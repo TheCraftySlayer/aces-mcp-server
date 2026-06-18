@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: aces-mcp-server
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: CUSTOMGPT_API_TOKEN
+        sync: false
+      - key: COMMUNITY_PROJECT_ID
+        sync: false
+      - key: ASSESSMENT_PROJECT_ID
+        value: "94006"
+      - key: CLEAR_PROJECT_ID
+        sync: false
+      - key: COMPLIANCE_PROJECT_ID
+        sync: false
+      - key: HOMEHARVEST_ACTION_ID
+        value: "7"
