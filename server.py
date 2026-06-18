@@ -55,7 +55,7 @@ CUSTOMGPT_BASE = "https://app.customgpt.ai/api/v1"
 TASK_CACHE_FILE = os.getenv("TASK_CACHE_FILE", "/tmp/aces_task_cache.json")
 
 def _now_iso() -> str:
-return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 def _stable_hash(text: str) -> str:
 value = text or ""
