@@ -1,3 +1,4 @@
+```yaml
 services:
   - type: web
     name: aces-mcp-server
@@ -6,15 +7,36 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+
       - key: CUSTOMGPT_API_TOKEN
         sync: false
+
       - key: COMMUNITY_PROJECT_ID
         sync: false
+
       - key: ASSESSMENT_PROJECT_ID
         value: "94006"
+
       - key: CLEAR_PROJECT_ID
         sync: false
+
       - key: COMPLIANCE_PROJECT_ID
         sync: false
+
       - key: HOMEHARVEST_ACTION_ID
         value: "7"
+
+      - key: FASTMCP_STATELESS_HTTP
+        value: "true"
+
+      - key: FASTMCP_JSON_RESPONSE
+        value: "true"
+
+      - key: TASK_CACHE_FILE
+        value: "/tmp/aces_task_cache.json"
+
+      - key: ACES_ADMIN_TOKEN
+        sync: false
+```
