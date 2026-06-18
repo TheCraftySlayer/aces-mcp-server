@@ -17,7 +17,6 @@ mcp = FastMCP(
     ),
     stateless_http=True,
     json_response=True
-
 )
 
 CUSTOMGPT_API_TOKEN = os.getenv("CUSTOMGPT_API_TOKEN", "")
