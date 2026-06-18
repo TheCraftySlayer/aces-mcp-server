@@ -106,6 +106,41 @@ def _find_task_cache_entry(project_id: str, task_id: str) -> Tuple[Optional[str]
     return None, None
 
 
+def _find_existing_prompt_task(project_id: str, tool_name: str, prompt_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Return an existing cached task for the same project/tool/prompt so repeated
+    calls do not create duplicate CustomGPT tasks.
+    """
+    key = _task_cache_key(project_id, tool_name, prompt_text)
+    existing = TASK_CACHE.get(key)
+
+    if not isinstance(existing, dict):
+        return None
+
+    task_id = str(existing.get("task_id") or "").strip()
+    status = str(existing.get("status") or "").strip()
+
+    if not task_id:
+        return None
+
+    reusable_statuses = {
+        "submitted",
+        "polling",
+        "still_running",
+        "completed",
+        "answered",
+        "final_fetch_or_empty_failed",
+        "completed_no_message_id",
+    }
+
+    if status in reusable_statuses:
+        return existing
+
+    return None
+
+
+
+
 def _remember_task(
     project_id: str,
     tool_name: str,
@@ -238,6 +273,7 @@ async def health_check(request):
             "task_cache_file": TASK_CACHE_FILE,
             "task_cache_count": len(TASK_CACHE),
             "task_cache_debug_enabled": bool(ACES_ADMIN_TOKEN),
+            "duplicate_prompt_reuse": True,
             "tools": [
                 "Community_Educator",
                 "Assessment_Context_Expert",
@@ -643,6 +679,24 @@ async def _call_customgpt_task(
 
     if tool_name == "Assessment_Context_Expert" and action_id:
         prompt_text = _enrich_homeharvest_prompt(prompt_text)
+
+    # Duplicate-proofing: if the same prompt already created a task, check that
+    # existing task instead of submitting a new CustomGPT task. This protects
+    # against routing agents that accidentally restart an address/HomeHarvest
+    # lookup when the user says "check again."
+    existing_task = _find_existing_prompt_task(project_id, tool_name, prompt_text)
+    if existing_task:
+        existing_task_id = str(existing_task.get("task_id") or "").strip()
+        if existing_task_id:
+            print(
+                f"[task-cache] reusing existing task tool={tool_name} "
+                f"project={project_id} task_id={existing_task_id}",
+                flush=True,
+            )
+            return await _check_customgpt_task_result(
+                project_id=project_id,
+                task_id=existing_task_id,
+            )
 
     headers = {
         "Authorization": f"Bearer {CUSTOMGPT_API_TOKEN}",
