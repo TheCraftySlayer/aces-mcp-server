@@ -15,6 +15,9 @@ mcp = FastMCP(
         "Assessment_Context_Expert, Clear_Expectations, and Compliance_Expert. "
         "Each tool takes exactly one promptText string and returns plain text."
     ),
+    stateless_http=True,
+    json_response=True
+
 )
 
 CUSTOMGPT_API_TOKEN = os.getenv("CUSTOMGPT_API_TOKEN", "")
