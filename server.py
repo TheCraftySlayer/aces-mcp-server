@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 import hashlib
 import time
@@ -57,6 +58,148 @@ def _stable_hash(text: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
 
 
+def _normalize_cache_text(text: str) -> str:
+    """
+    Normalize prompts for duplicate detection. This is intentionally only for
+    cache keys; it is never used as the prompt sent to CustomGPT.
+    """
+    value = (text or "").lower()
+    value = value.replace("new mexico", "nm")
+    value = value.replace("court", "ct")
+    value = value.replace("drive", "dr")
+    value = value.replace("road", "rd")
+    value = value.replace("street", "st")
+    value = value.replace("avenue", "ave")
+    value = value.replace("lane", "ln")
+    value = value.replace("boulevard", "blvd")
+    value = value.replace("place", "pl")
+    value = value.replace("circle", "cir")
+    value = value.replace("trail", "trl")
+    value = value.replace("comparable properties", "comps")
+    value = value.replace("comparables", "comps")
+    value = value.replace("comparable", "comp")
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _extract_label_block(prompt_text: str, label: str, stop_labels: Optional[List[str]] = None) -> str:
+    """
+    Extract a section such as Address/search area or Staff request from promptText.
+    """
+    text = prompt_text or ""
+    stop_labels = stop_labels or []
+    pattern = re.compile(re.escape(label) + r"\s*(.*)", re.IGNORECASE | re.DOTALL)
+    match = pattern.search(text)
+
+    if not match:
+        return ""
+
+    block = match.group(1)
+
+    for stop in stop_labels:
+        stop_pattern = re.compile(r"\n\s*" + re.escape(stop), re.IGNORECASE)
+        stop_match = stop_pattern.search(block)
+        if stop_match:
+            block = block[: stop_match.start()]
+
+    return block.strip()
+
+
+def _extract_address_for_cache(prompt_text: str) -> str:
+    """
+    Pull the address/search area if present. Falls back to a rough street-address
+    regex so small routing changes do not create duplicate CustomGPT tasks.
+    """
+    text = prompt_text or ""
+
+    labeled = _extract_label_block(
+        text,
+        "Address/search area:",
+        ["Staff request:", "Instructions:", "Uploaded record transcription:"],
+    )
+
+    if labeled:
+        first_line = labeled.strip().splitlines()[0].strip()
+        return _normalize_cache_text(first_line)
+
+    # Rough address fallback, e.g. "2 lauren taylor ct tijeras nm 87059".
+    lowered = text.lower().replace("new mexico", "nm")
+    match = re.search(
+        r"\b\d{1,6}\s+[a-z0-9 .'-]{2,80}\s+"
+        r"(?:ct|court|dr|drive|rd|road|st|street|ave|avenue|ln|lane|way|blvd|boulevard|pl|place|cir|circle|trl|trail)"
+        r"(?:[\s,]+[a-z .'-]{2,40})?(?:[\s,]+nm)?(?:[\s,]+\d{5})?",
+        lowered,
+        re.IGNORECASE,
+    )
+
+    if match:
+        return _normalize_cache_text(match.group(0))
+
+    return ""
+
+
+def _canonical_prompt_for_cache(tool_name: str, prompt_text: str) -> str:
+    """
+    Build a semantic cache key so repeated address/comps requests reuse the
+    same task even when the front router rephrases or echoes MODE blocks.
+    """
+    raw = prompt_text or ""
+    norm = _normalize_cache_text(raw)
+
+    if tool_name == "Assessment_Context_Expert":
+        mode = "assessment"
+
+        if "mode address homeharvest lookup" in norm:
+            mode = "address_homeharvest"
+        elif "mode record homeharvest comp support" in norm:
+            mode = "record_homeharvest_comp"
+        elif "mode record analysis" in norm:
+            mode = "record_analysis"
+
+        address = _extract_address_for_cache(raw)
+
+        wants_comps = any(
+            word in norm
+            for word in [
+                "comp",
+                "comps",
+                "nearby sale",
+                "nearby sales",
+                "sold",
+                "sale",
+                "sales",
+                "market",
+                "similar",
+            ]
+        )
+        wants_listing = any(word in norm for word in ["listing", "listings", "active", "for sale"])
+        wants_lookup = any(word in norm for word in ["look up", "lookup", "property", "address", "homeharvest"])
+
+        if wants_comps:
+            intent = "comps"
+        elif wants_listing:
+            intent = "listings"
+        elif wants_lookup or address:
+            intent = "address_lookup"
+        else:
+            intent = "assessment"
+
+        count_match = re.search(r"\b(\d{1,2})\s+(?:comp|comps|properties|sales|listings)\b", norm)
+        years_match = re.search(r"\b(?:past|last|within)\s+(\d{1,2})\s+years?\b", norm)
+
+        count = count_match.group(1) if count_match else ""
+        years = years_match.group(1) if years_match else ""
+
+        # For HomeHarvest/address work, address + intent + key constraints are
+        # more stable than hashing the entire generated promptText.
+        if address:
+            return f"{tool_name}|{mode}|{address}|{intent}|count={count}|years={years}"
+
+    # For non-address or non-assessment work, keep an exact-ish normalized prompt
+    # so unrelated questions do not collide.
+    return f"{tool_name}|{norm[:1200]}"
+
+
 def _safe_json_dumps(value: Any, max_len: int = 3000) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False)
@@ -94,7 +237,8 @@ TASK_CACHE: Dict[str, Any] = _load_task_cache()
 
 
 def _task_cache_key(project_id: str, tool_name: str, prompt_text: str) -> str:
-    return f"{project_id}|{tool_name}|{_stable_hash(prompt_text)}"
+    canonical = _canonical_prompt_for_cache(tool_name, prompt_text)
+    return f"{project_id}|{tool_name}|{_stable_hash(canonical)}"
 
 
 def _find_task_cache_entry(project_id: str, task_id: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -108,20 +252,12 @@ def _find_task_cache_entry(project_id: str, task_id: str) -> Tuple[Optional[str]
 
 def _find_existing_prompt_task(project_id: str, tool_name: str, prompt_text: str) -> Optional[Dict[str, Any]]:
     """
-    Return an existing cached task for the same project/tool/prompt so repeated
-    calls do not create duplicate CustomGPT tasks.
+    Return an existing cached task for the same project/tool/semantic prompt.
+    This scans by canonical key and by saved dedupe hash so rephrased MODE blocks
+    do not create duplicate CustomGPT tasks.
     """
     key = _task_cache_key(project_id, tool_name, prompt_text)
-    existing = TASK_CACHE.get(key)
-
-    if not isinstance(existing, dict):
-        return None
-
-    task_id = str(existing.get("task_id") or "").strip()
-    status = str(existing.get("status") or "").strip()
-
-    if not task_id:
-        return None
+    dedupe_hash = _stable_hash(_canonical_prompt_for_cache(tool_name, prompt_text))
 
     reusable_statuses = {
         "submitted",
@@ -133,12 +269,32 @@ def _find_existing_prompt_task(project_id: str, tool_name: str, prompt_text: str
         "completed_no_message_id",
     }
 
-    if status in reusable_statuses:
-        return existing
+    direct = TASK_CACHE.get(key)
+    if isinstance(direct, dict):
+        task_id = str(direct.get("task_id") or "").strip()
+        status = str(direct.get("status") or "").strip()
+        if task_id and status in reusable_statuses:
+            return direct
+
+    # Fallback scan lets future cache format changes still dedupe correctly.
+    for value in TASK_CACHE.values():
+        if not isinstance(value, dict):
+            continue
+
+        if str(value.get("project_id", "")) != str(project_id):
+            continue
+
+        if str(value.get("tool_name", "")) != str(tool_name):
+            continue
+
+        task_id = str(value.get("task_id") or "").strip()
+        status = str(value.get("status") or "").strip()
+        value_dedupe_hash = str(value.get("dedupe_hash") or "").strip()
+
+        if task_id and status in reusable_statuses and value_dedupe_hash == dedupe_hash:
+            return value
 
     return None
-
-
 
 
 def _remember_task(
@@ -168,6 +324,7 @@ def _remember_task(
             "latest_status": str(latest_status or status or ""),
             "message_id": str(message_id) if message_id else None,
             "prompt_hash": _stable_hash(prompt_text),
+            "dedupe_hash": _stable_hash(_canonical_prompt_for_cache(tool_name, prompt_text)),
             "updated_at": _now_iso(),
         }
     )
@@ -274,6 +431,7 @@ async def health_check(request):
             "task_cache_count": len(TASK_CACHE),
             "task_cache_debug_enabled": bool(ACES_ADMIN_TOKEN),
             "duplicate_prompt_reuse": True,
+            "semantic_duplicate_prompt_reuse": True,
             "tools": [
                 "Community_Educator",
                 "Assessment_Context_Expert",
