@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import asyncio
@@ -699,4 +698,3 @@ async def Compliance_Expert(promptText: str) -> str:
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     mcp.run(transport="http", host="0.0.0.0", port=port)
-```
