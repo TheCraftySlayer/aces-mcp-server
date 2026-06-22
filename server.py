@@ -55,6 +55,21 @@ HOMEHARVEST_POLL_SECONDS = int(os.getenv("ACES_HOMEHARVEST_POLL_SECONDS", "25"))
 POLL_INTERVAL_SECONDS = float(os.getenv("ACES_POLL_INTERVAL_SECONDS", "3"))
 MAX_CACHED_ANSWER_CHARS = int(os.getenv("ACES_MAX_CACHED_ANSWER_CHARS", "80000"))
 
+# Fresh lookup behavior:
+# Address / HomeHarvest / comps / listing work should usually create a fresh
+# CustomGPT task. Otherwise Copilot can appear to call the MCP tool while the
+# server returns an old cached answer in ~0.25 seconds.
+FRESH_HOMEHARVEST_LOOKUPS = os.getenv("ACES_FRESH_HOMEHARVEST_LOOKUPS", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+# Set this to "true" only if you want exact repeated HomeHarvest prompts to reuse
+# completed cached answers. The safer default for staff testing is false.
+REUSE_COMPLETED_HOMEHARVEST_ANSWERS = os.getenv("ACES_REUSE_COMPLETED_HOMEHARVEST_ANSWERS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+# Optional: allow reuse of in-flight HomeHarvest tasks so repeated "check again"
+# style calls do not spawn duplicate CustomGPT tasks while the first task is still running.
+REUSE_RUNNING_HOMEHARVEST_TASKS = os.getenv("ACES_REUSE_RUNNING_HOMEHARVEST_TASKS", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -63,6 +78,12 @@ def _now_iso() -> str:
 def _stable_hash(text: str) -> str:
     value = text or ""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def _log(message: str, **kwargs: Any) -> None:
+    """Small structured-ish logger for Render stdout."""
+    details = " ".join(f"{key}={value}" for key, value in kwargs.items() if value is not None)
+    print(f"[aces] {message}" + (f" {details}" if details else ""), flush=True)
 
 
 def _trim_cached_answer(answer: Optional[str]) -> Optional[str]:
@@ -398,6 +419,9 @@ async def health_check(request):
             "duplicate_prompt_reuse": True,
             "semantic_duplicate_prompt_reuse": True,
             "cached_final_answers": True,
+            "fresh_homeharvest_lookups": FRESH_HOMEHARVEST_LOOKUPS,
+            "reuse_completed_homeharvest_answers": REUSE_COMPLETED_HOMEHARVEST_ANSWERS,
+            "reuse_running_homeharvest_tasks": REUSE_RUNNING_HOMEHARVEST_TASKS,
             "tools": [
                 "Community_Educator",
                 "Assessment_Context_Expert",
@@ -416,6 +440,21 @@ async def task_cache_debug(request):
     if not _admin_authorized(request):
         return JSONResponse({"error": "Unauthorized. Supply x-aces-admin-token header or ?token=..."}, status_code=401)
     return JSONResponse({"count": len(TASK_CACHE), "tasks": TASK_CACHE})
+
+
+@mcp.custom_route("/task-cache/clear", methods=["POST"])
+async def task_cache_clear(request):
+    """Admin-only route to clear the local Render task cache."""
+    if not ACES_ADMIN_TOKEN:
+        return JSONResponse({"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403)
+    if not _admin_authorized(request):
+        return JSONResponse({"error": "Unauthorized. Supply x-aces-admin-token header or ?token=..."}, status_code=401)
+
+    count = len(TASK_CACHE)
+    TASK_CACHE.clear()
+    _save_task_cache(TASK_CACHE)
+    _log("task cache cleared", count=count)
+    return JSONResponse({"cleared": True, "previous_count": count, "count": len(TASK_CACHE)})
 
 
 @mcp.custom_route("/check-task", methods=["GET"])
@@ -492,8 +531,10 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     action_rule = (
         "\n\nHOMEHARVEST ACTION RULE:\n"
         "- Use the enabled HomeHarvest custom action when the request is an address, nearby sale, or comp lookup.\n"
+        "- Do not answer from memory, previous runs, cached examples, or stale conversation context. Run the action for this request.\n"
         "- Prefer operation homeharvestSearchProperties.\n"
         "- Use POST /properties/search.\n"
+        "- For sold/comps requests, use sold/listing_type=sold filters when supported and honor date range instructions.\n"
         "- Return staff-readable numbered cards, not raw JSON.\n"
         "- If no exact match appears, say no exact match was returned and summarize nearby/public aggregator results.\n"
         "- A no-result response is not a tool failure.\n"
@@ -750,6 +791,42 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
         return answer
 
 
+def _is_homeharvest_lookup(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
+    return tool_name == "Assessment_Context_Expert" and bool(action_id or _should_enable_homeharvest(prompt_text))
+
+
+def _should_reuse_prompt_cache(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
+    """
+    Decide whether a direct specialist tool call may reuse a prompt-level cached task.
+
+    Important: this controls only the initial tool call. Task IDs can still be
+    checked through Check_CustomGPT_Task, and every submitted task is still saved.
+    """
+    if not _is_homeharvest_lookup(tool_name, prompt_text, action_id):
+        return True
+
+    if not FRESH_HOMEHARVEST_LOOKUPS:
+        return True
+
+    # For staff property/comps/address lookups, a completed cached answer is the
+    # common reason Copilot says the MCP tool completed but the Context Expert was
+    # never queried again.
+    return False
+
+
+def _should_reuse_existing_homeharvest_task(existing_task: Dict[str, Any]) -> bool:
+    """Allow reuse only for still-running HomeHarvest tasks, not completed answers."""
+    if not REUSE_RUNNING_HOMEHARVEST_TASKS:
+        return False
+    status = str(existing_task.get("status") or "").strip()
+    latest_status = str(existing_task.get("latest_status") or "").strip()
+    if status in {"submitted", "polling", "still_running"}:
+        return True
+    if latest_status and latest_status not in {"completed", "answered", "history_fallback"}:
+        return True
+    return False
+
+
 async def _call_customgpt_task(
     project_id: str,
     prompt_text: str,
@@ -768,19 +845,42 @@ async def _call_customgpt_task(
     if tool_name == "Assessment_Context_Expert" and action_id:
         prompt_text = _enrich_homeharvest_prompt(prompt_text)
 
-    # Duplicate-proofing: if the same prompt already created a task, reuse it.
+    _log("specialist tool received prompt", tool=tool_name, project=project_id, action_id=action_id or "", prompt_preview=_safe_json_dumps(prompt_text[:800], 900))
+
+    should_reuse_prompt_cache = _should_reuse_prompt_cache(tool_name, prompt_text, action_id)
+
+    # Duplicate-proofing: non-HomeHarvest tools can reuse cached answers.
+    # HomeHarvest/address/comps lookups default to fresh submissions so repeated
+    # Copilot tests actually reach CustomGPT/Context Expert instead of returning
+    # an old last_answer from the Render cache.
     existing_task = _find_existing_prompt_task(project_id, tool_name, prompt_text)
-    if existing_task:
+    if existing_task and should_reuse_prompt_cache:
         existing_answer = str(existing_task.get("last_answer") or "").strip()
         if existing_answer:
+            _log("CACHE HIT - returning cached answer without CustomGPT submit", tool=tool_name, project=project_id, task_id=existing_task.get("task_id"))
             return existing_answer
         existing_task_id = str(existing_task.get("task_id") or "").strip()
         if existing_task_id:
-            print(f"[task-cache] reusing existing task tool={tool_name} project={project_id} task_id={existing_task_id}", flush=True)
+            _log("CACHE HIT - rechecking existing task", tool=tool_name, project=project_id, task_id=existing_task_id)
             return await _check_customgpt_task_result(project_id=project_id, task_id=existing_task_id)
 
+    if existing_task and _is_homeharvest_lookup(tool_name, prompt_text, action_id) and _should_reuse_existing_homeharvest_task(existing_task):
+        existing_task_id = str(existing_task.get("task_id") or "").strip()
+        if existing_task_id:
+            _log("REUSING IN-FLIGHT HOMEHARVEST TASK", tool=tool_name, project=project_id, task_id=existing_task_id)
+            return await _check_customgpt_task_result(project_id=project_id, task_id=existing_task_id)
+
+    if existing_task and not should_reuse_prompt_cache:
+        _log("BYPASSING PROMPT CACHE - fresh HomeHarvest/Assessment lookup", tool=tool_name, project=project_id, previous_task_id=existing_task.get("task_id"))
+
     headers = {"Authorization": f"Bearer {CUSTOMGPT_API_TOKEN}", "Accept": "application/json"}
-    task_name = f"ACES|{tool_name}|{_stable_hash(prompt_text)}"
+
+    if not should_reuse_prompt_cache:
+        task_name = f"ACES|{tool_name}|fresh|{int(time.time())}|{_stable_hash(prompt_text)}"
+    else:
+        task_name = f"ACES|{tool_name}|{_stable_hash(prompt_text)}"
+
+    _log("SUBMITTING NEW CUSTOMGPT TASK", tool=tool_name, project=project_id, task_name=task_name)
 
     multipart: Dict[str, Any] = {
         "name": (None, task_name),
@@ -796,6 +896,7 @@ async def _call_customgpt_task(
     async with httpx.AsyncClient(timeout=timeout) as client:
         submit = await client.post(f"{CUSTOMGPT_BASE}/projects/{project_id}/tasks", headers=headers, files=multipart)
         submit_data = await _read_json_or_text(submit)
+        _log("CustomGPT submit response", tool=tool_name, project=project_id, http_status=submit.status_code, response_preview=_safe_json_dumps(submit_data, 1200))
 
         if submit.status_code >= 400:
             return f"{tool_name} task submit failed.\nHTTP status: {submit.status_code}\nResponse: {_safe_json_dumps(submit_data)}"
@@ -934,6 +1035,7 @@ async def Assessment_Context_Expert(promptText: str) -> str:
     """
     action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(promptText) else None
     poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else DEFAULT_POLL_SECONDS
+    _log("Assessment_Context_Expert invoked", homeharvest_enabled=bool(action_id), action_id=action_id or "", poll_seconds=poll_seconds)
     return await _call_customgpt_task(
         ASSESSMENT_PROJECT_ID,
         promptText,
