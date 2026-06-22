@@ -710,6 +710,16 @@ def _arcgis_where_candidates(search_text: str) -> List[Tuple[str, str]]:
     return unique
 
 
+def _compact_none_dict(value: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return a dict without empty/None values, or None if nothing remains."""
+    cleaned = {
+        key: val
+        for key, val in (value or {}).items()
+        if val is not None and val != ""
+    }
+    return cleaned or None
+
+
 def _normalize_arcgis_parcel(attrs: Dict[str, Any]) -> Dict[str, Any]:
     owner_address = attrs.get("CompleteOwnerAddress") or " ".join(
         part for part in [attrs.get("OWNADD"), attrs.get("OWNADD2")] if part
@@ -717,6 +727,7 @@ def _normalize_arcgis_parcel(attrs: Dict[str, Any]) -> Dict[str, Any]:
     situs_address = attrs.get("CompleteSiteAddress") or " ".join(
         part for part in [attrs.get("SITUSADD"), attrs.get("SITUSADD2")] if part
     )
+
     acreage = attrs.get("ACREAGE")
     if acreage is None:
         acreage = attrs.get("INTACRES")
@@ -725,45 +736,130 @@ def _normalize_arcgis_parcel(attrs: Dict[str, Any]) -> Dict[str, Any]:
 
     year_built = attrs.get("DWEL_YRBLT") or attrs.get("COM_YRBLT")
 
-    values = {
-        "land_value": attrs.get("LANDVALUE"),
-        "ag_value": attrs.get("AGVALUE"),
-        "improvement_value": attrs.get("IMPTVALUE"),
-        "total_value": attrs.get("TOTVALUE"),
-        "land_taxable": attrs.get("LANDTXBLE"),
-        "improvement_taxable": attrs.get("IMPTTXBLE"),
-        "total_taxable": attrs.get("TOTTXBLE"),
-        "head_of_household_exemption": attrs.get("HOHEXEMP"),
-        "veteran_exemption": attrs.get("VETEXEMP"),
-        "other_exemption": attrs.get("OTHEREXEMP"),
-        "total_exemption": attrs.get("TOTALEXEMP"),
-        "net_taxable": attrs.get("NETTAXABLE"),
-    }
-    values = {key: value for key, value in values.items() if value is not None}
+    assessment_values = _compact_none_dict(
+        {
+            "land_value": attrs.get("LANDVALUE"),
+            "ag_value": attrs.get("AGVALUE"),
+            "improvement_value": attrs.get("IMPTVALUE"),
+            "total_value": attrs.get("TOTVALUE"),
+            "land_taxable": attrs.get("LANDTXBLE"),
+            "improvement_taxable": attrs.get("IMPTTXBLE"),
+            "total_taxable": attrs.get("TOTTXBLE"),
+            "net_taxable": attrs.get("NETTAXABLE"),
+        }
+    )
+
+    exemptions = _compact_none_dict(
+        {
+            "head_of_household": attrs.get("HOHEXEMP"),
+            "veteran": attrs.get("VETEXEMP"),
+            "other": attrs.get("OTHEREXEMP"),
+            "total": attrs.get("TOTALEXEMP"),
+        }
+    )
+
+    situs_components = _compact_none_dict(
+        {
+            "number": attrs.get("SITUSNUM"),
+            "street": attrs.get("SITUSSTR"),
+            "street_type": attrs.get("SITUSSTRTY"),
+            "direction": attrs.get("SITUSDIREC"),
+            "city": attrs.get("SITUSCITY"),
+            "state": attrs.get("SITUSSTATE"),
+            "zip": attrs.get("SITUSZIP"),
+            "zip4": attrs.get("SITUSZIP2"),
+        }
+    )
+
+    owner_components = _compact_none_dict(
+        {
+            "house_number": attrs.get("OWNHSENUM"),
+            "sub_number": attrs.get("OWNSUBNUM"),
+            "address_direction": attrs.get("OWNADDIR"),
+            "street": attrs.get("OWNSTR"),
+            "street_type": attrs.get("OWNSTRTYPE"),
+            "direction": attrs.get("OWNDIRECT"),
+            "box": attrs.get("OWNBOX"),
+            "unit": attrs.get("OWNUNIT"),
+            "unit_number": attrs.get("OWNUNITNO"),
+            "city": attrs.get("OWNCITY"),
+            "state": attrs.get("OWNSTATE"),
+            "country": attrs.get("OWNCOUNTRY"),
+            "zip": attrs.get("OWNZIPCODE"),
+            "zip4": attrs.get("OWNZIP4"),
+            "code": attrs.get("OWNCODE"),
+        }
+    )
+
+    coordinates = _compact_none_dict(
+        {
+            "x": attrs.get("X_Coord"),
+            "y": attrs.get("Y_Coord"),
+        }
+    )
 
     return {
         "object_id": attrs.get("OBJECTID"),
+        "oid": attrs.get("OID"),
         "upc": attrs.get("UPC") or attrs.get("TXTUPC"),
+        "txt_upc": attrs.get("TXTUPC"),
         "tax_year": attrs.get("TAXYR") or attrs.get("INTTAXYR"),
+        "int_tax_year": attrs.get("INTTAXYR"),
+        "pin": attrs.get("PIN"),
+        "pid": attrs.get("PID"),
+        "tid": attrs.get("TID"),
         "owner": attrs.get("OWNER"),
         "owner_address": owner_address or None,
+        "owner_components": owner_components,
         "situs_address": situs_address or None,
+        "situs_components": situs_components,
+        "tax_district": attrs.get("TAXDIST"),
         "legal_description": attrs.get("LEGALDESC"),
+        "document_number": attrs.get("DOCNUM"),
         "roll_type": attrs.get("ROLLTYPE"),
         "valuation_class": attrs.get("VALCLASS"),
         "property_class": attrs.get("PROPCLASS"),
         "land_use_code": attrs.get("LUC"),
-        "land_use_description": attrs.get("LUC_MSG") or attrs.get("C_DESCR"),
+        "land_use_description": attrs.get("LUC_MSG"),
+        "class_description": attrs.get("C_DESCR"),
         "style": attrs.get("STYLE"),
         "year_built": year_built,
+        "dwelling_year_built": attrs.get("DWEL_YRBLT"),
+        "commercial_year_built": attrs.get("COM_YRBLT"),
         "acreage": acreage,
-        "pin": attrs.get("PIN"),
-        "pid": attrs.get("PID"),
-        "tid": attrs.get("TID"),
-        "x_coord": attrs.get("X_Coord"),
-        "y_coord": attrs.get("Y_Coord"),
-        "assessment_values": values or None,
+        "calculated_acres": attrs.get("PAR_CALCAC"),
+        "int_acres": attrs.get("INTACRES"),
+        "job_type": attrs.get("INTJOBTYPE"),
+        "condominium": attrs.get("TXTCONDOMI"),
+        "building": attrs.get("TXTBLDG"),
+        "unit": attrs.get("TXTUNIT"),
+        "floor": attrs.get("TXTFLR"),
+        "duplicate_flag": attrs.get("DUPL"),
+        "parcel_type": attrs.get("INTTYPE"),
+        "coordinates": coordinates,
+        "assessment_values": assessment_values,
+        "exemptions": exemptions,
     }
+
+def _fmt_arcgis_number(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        number = float(value)
+        if number.is_integer():
+            return f"{int(number):,}"
+        return f"{number:,.4f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(value)
+
+
+def _fmt_arcgis_money(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        return f"${float(value):,.0f}"
+    except Exception:
+        return str(value)
 
 
 def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
@@ -778,25 +874,33 @@ def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
         "Limit: Public GIS parcel context only. Verify final assessment details in iasWorld.",
         "",
     ]
+
     for idx, item in enumerate(result.get("results") or [], start=1):
+        values = item.get("assessment_values") or {}
+        exemptions = item.get("exemptions") or {}
+        coords = item.get("coordinates") or {}
+
         lines.extend(
             [
                 f"{idx}. {item.get('situs_address') or 'Unknown situs address'}",
-                f"   UPC: {item.get('upc') or ''}",
+                f"   UPC/PIN: {item.get('upc') or ''} / {item.get('pin') or ''}",
                 f"   Tax Year: {item.get('tax_year') or ''}",
                 f"   Owner: {item.get('owner') or ''}",
                 f"   Owner Address: {item.get('owner_address') or ''}",
                 f"   Legal Description: {item.get('legal_description') or ''}",
                 f"   Roll/Class: {item.get('roll_type') or ''} / {item.get('valuation_class') or ''} / {item.get('property_class') or ''}",
-                f"   Land Use/Style: {item.get('land_use_code') or ''} {item.get('land_use_description') or ''} / {item.get('style') or ''}",
-                f"   Built/Acres: {item.get('year_built') or ''} / {item.get('acreage') if item.get('acreage') is not None else ''}",
-                f"   Total Value/Net Taxable: {(item.get('assessment_values') or {}).get('total_value', '')} / {(item.get('assessment_values') or {}).get('net_taxable', '')}",
+                f"   Tax District / Doc: {item.get('tax_district') or ''} / {item.get('document_number') or ''}",
+                f"   Land Use: {item.get('land_use_code') or ''} {item.get('land_use_description') or ''}",
+                f"   Class/Style: {item.get('class_description') or ''} / {item.get('style') or ''}",
+                f"   Built/Acres: {item.get('year_built') or ''} / {_fmt_arcgis_number(item.get('acreage'))}",
+                f"   Values: Land {_fmt_arcgis_money(values.get('land_value'))}; Improvements {_fmt_arcgis_money(values.get('improvement_value'))}; Total {_fmt_arcgis_money(values.get('total_value'))}; Net Taxable {_fmt_arcgis_money(values.get('net_taxable'))}",
+                f"   Exemptions: HOH {_fmt_arcgis_money(exemptions.get('head_of_household'))}; Veteran {_fmt_arcgis_money(exemptions.get('veteran'))}; Other {_fmt_arcgis_money(exemptions.get('other'))}; Total {_fmt_arcgis_money(exemptions.get('total'))}",
+                f"   X/Y: {_fmt_arcgis_number(coords.get('x'))} / {_fmt_arcgis_number(coords.get('y'))}",
                 f"   OBJECTID: {item.get('object_id') or ''}",
                 "",
             ]
         )
     return "\n".join(lines).strip()
-
 
 async def _arcgis_public_parcel_lookup_result(
     search_text: str,
@@ -967,24 +1071,37 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
         lines.append(f"- Match count: {len(results)}")
         if len(results) == 1:
             item = results[0]
+            values = item.get("assessment_values") or {}
+            exemptions = item.get("exemptions") or {}
+            coords = item.get("coordinates") or {}
             lines.extend(
                 [
                     "- Subject anchor: exact/single public GIS match.",
                     f"- UPC: {item.get('upc') or ''}",
+                    f"- PIN: {item.get('pin') or ''}",
+                    f"- PID/TID: {item.get('pid') or ''} / {item.get('tid') or ''}",
                     f"- Tax year: {item.get('tax_year') or ''}",
                     f"- Situs address: {item.get('situs_address') or ''}",
                     f"- Owner: {item.get('owner') or ''}",
                     f"- Owner address: {item.get('owner_address') or ''}",
+                    f"- Tax district: {item.get('tax_district') or ''}",
                     f"- Legal description: {item.get('legal_description') or ''}",
+                    f"- Document number: {item.get('document_number') or ''}",
                     f"- Roll type: {item.get('roll_type') or ''}",
                     f"- Valuation class: {item.get('valuation_class') or ''}",
                     f"- Property class: {item.get('property_class') or ''}",
                     f"- Land use: {item.get('land_use_code') or ''} {item.get('land_use_description') or ''}",
+                    f"- Class description: {item.get('class_description') or ''}",
                     f"- Style: {item.get('style') or ''}",
                     f"- Year built: {item.get('year_built') or ''}",
                     f"- Acreage: {item.get('acreage') if item.get('acreage') is not None else ''}",
-                    f"- Total value: {(item.get('assessment_values') or {}).get('total_value', '')}",
-                    f"- Net taxable: {(item.get('assessment_values') or {}).get('net_taxable', '')}",
+                    f"- Land value: {values.get('land_value', '')}",
+                    f"- Improvement value: {values.get('improvement_value', '')}",
+                    f"- Total value: {values.get('total_value', '')}",
+                    f"- Total taxable: {values.get('total_taxable', '')}",
+                    f"- Net taxable: {values.get('net_taxable', '')}",
+                    f"- Exemptions shown: HOH {exemptions.get('head_of_household', '')}; Veteran {exemptions.get('veteran', '')}; Other {exemptions.get('other', '')}; Total {exemptions.get('total', '')}",
+                    f"- Coordinates: X {coords.get('x', '')}; Y {coords.get('y', '')}",
                     f"- OBJECTID: {item.get('object_id') or ''}",
                 ]
             )
@@ -993,7 +1110,7 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
             for idx, item in enumerate(results[:5], start=1):
                 lines.append(
                     f"  {idx}. {item.get('situs_address') or 'Unknown situs'} | "
-                    f"UPC {item.get('upc') or ''} | "
+                    f"UPC {item.get('upc') or ''} | PIN {item.get('pin') or ''} | "
                     f"Class {item.get('valuation_class') or ''}/{item.get('property_class') or ''} | "
                     f"LUC {item.get('land_use_code') or ''} | "
                     f"Built {item.get('year_built') or ''} | "
@@ -1016,14 +1133,14 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
             "",
             "GIS + HOMEHARVEST INSTRUCTIONS:",
             "- Use the GIS parcel as the subject anchor when a single match is present.",
-            "- For HomeHarvest comps, search around the GIS situs address and prefer residential results consistent with property class, valuation class, land use, year built, style, acreage, and location when available.",
-            "- Never use GIS assessment values, taxable values, or exemptions as sale prices or comp prices.",
+            "- For HomeHarvest comps, search around the GIS situs address and prefer residential results consistent with property class, valuation class, land use, year built, style, acreage, tax district, and location when available.",
+            "- Never use GIS assessment values, taxable values, exemption amounts, AVMs, Zestimates, estimates, or list prices as sale prices or comp prices.",
             "- Return the GIS subject context first, then the unofficial HomeHarvest/public-aggregator results.",
             "- Clearly label HomeHarvest results as unofficial public-aggregator candidates, not verified sales or final appraisal comps.",
+            "- Do not mention an interactive map, file manager, generated file, download, attachment, report, or exported view unless the current tool response includes an actual generated_files item or downloadable link.",
         ]
     )
     return "\n".join(lines).strip()
-
 
 async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
     """Prepend public ArcGIS parcel context to HomeHarvest/address/comps prompts."""
@@ -1199,12 +1316,10 @@ async def start_lookup_route(request):
     """
     REST wrapper for Power Automate/Copilot Studio.
 
-    POST /start-lookup
-    Headers:
-      x-aces-admin-token: <ACES_ADMIN_TOKEN>
-      Content-Type: application/json
-    Body:
-      {"promptText": "look up 2 Lauren Taylor Ct Tijeras NM and find 10 comps"}
+    Plain address/parcel lookups return a fast ArcGIS-only response.
+    Requests for comps, sales, listings, market support, HomeHarvest, or public
+    aggregator data run ArcGIS first and then submit the enriched prompt to
+    Assessment_Context_Expert/HomeHarvest.
 
     Returns:
       {"status":"completed|still_processing|failed|task_not_found",
@@ -1230,6 +1345,27 @@ async def start_lookup_route(request):
         )
 
     try:
+        # Fast path: plain address/parcel lookup should not spawn a long
+        # HomeHarvest/CustomGPT task or return comps unless staff asked for comps,
+        # sales, listings, market support, HomeHarvest, or public aggregator data.
+        if _should_use_arcgis_only_lookup(prompt_text):
+            search_text = _extract_arcgis_search_text_from_prompt(prompt_text) or prompt_text
+            gis_result = await _arcgis_public_parcel_lookup_result(
+                search_text=search_text,
+                max_results=ARCGIS_PUBLIC_PARCEL_MAX_RESULTS,
+                return_geometry=False,
+            )
+            answer = _format_arcgis_parcel_lookup_text(gis_result)
+            status = "completed" if gis_result.get("status") in {"completed", "empty"} else "failed"
+            return JSONResponse(
+                {
+                    "status": status,
+                    "answer": answer,
+                    "task_id": "",
+                    "project_id": ASSESSMENT_PROJECT_ID,
+                }
+            )
+
         action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(prompt_text) else None
         poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else DEFAULT_POLL_SECONDS
         raw_result = await _call_customgpt_task(
@@ -1398,13 +1534,12 @@ def _require_config(project_id: str, tool_name: str) -> Optional[str]:
     return None
 
 
-def _should_enable_homeharvest(prompt_text: str) -> bool:
+def _request_needs_homeharvest(prompt_text: str) -> bool:
     """
-    Enable HomeHarvest only for explicit HomeHarvest/address/comps/listing/public
-    aggregator work. Keep ordinary PRC/code/value review from receiving action overrides.
+    True only when the user asks for market/listing/sale/comp/public aggregator
+    work. Plain address lookup should stay ArcGIS-only and return immediately.
     """
     text = (prompt_text or "").lower()
-    padded = f" {text} "
 
     explicit_mode = (
         "mode: address / homeharvest lookup" in text
@@ -1414,30 +1549,51 @@ def _should_enable_homeharvest(prompt_text: str) -> bool:
     )
 
     comp_or_listing_words = [
+        "comp",
         "comps",
-        "comp ",
         "comparable",
+        "similar properties",
         "nearby sales",
         "nearby sale",
+        "sales nearby",
         "sold properties",
         "sold property",
+        "sold homes",
+        "sale price",
+        "sales price",
+        "sale date",
         "listing data",
         "listings",
+        "active listing",
+        "pending listing",
+        "for sale",
         "market support",
+        "market value support",
+        "candidate comps",
     ]
 
-    street_suffixes = [
-        " ct", " court", " dr", " drive", " rd", " road", " st", " street", " ave", " avenue",
-        " ln", " lane", " way", " blvd", " boulevard", " pl", " place", " cir", " circle", " trl", " trail",
-    ]
-    looks_like_nm_address = (
-        (" nm" in padded or "new mexico" in text or "albuquerque" in text or "tijeras" in text)
-        and any(suffix in padded for suffix in street_suffixes)
-    )
+    return explicit_mode or any(word in text for word in comp_or_listing_words)
 
-    address_lookup_request = ("look up" in text or "lookup" in text or "search" in text or "find" in text) and looks_like_nm_address
-    return explicit_mode or any(word in text for word in comp_or_listing_words) or address_lookup_request
 
+def _looks_like_arcgis_lookup(prompt_text: str) -> bool:
+    """Detect a plain address/UPC/property lookup that can be answered by ArcGIS."""
+    text = (prompt_text or "").lower()
+    search_text = _extract_arcgis_search_text_from_prompt(prompt_text)
+    lookup_words = ["look up", "lookup", "search", "find", "parcel", "property", "situs", "address", "owner", "upc", "pin"]
+    return bool(search_text) and any(word in text for word in lookup_words)
+
+
+def _should_use_arcgis_only_lookup(prompt_text: str) -> bool:
+    """Use ArcGIS-only fast path for plain parcel/address lookup."""
+    return _looks_like_arcgis_lookup(prompt_text) and not _request_needs_homeharvest(prompt_text)
+
+
+def _should_enable_homeharvest(prompt_text: str) -> bool:
+    """
+    Enable HomeHarvest only for explicit HomeHarvest/comps/sales/listing/market
+    work. Plain address lookup is handled by the ArcGIS-only fast path.
+    """
+    return _request_needs_homeharvest(prompt_text)
 
 def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     """Add action-use guidance without overriding an existing MODE block."""
@@ -1471,6 +1627,7 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "- Sort by comp similarity first, not newest first.\n"
     "- Label results as unofficial public-aggregator candidate comps, not verified sales.\n"
     "- If the source only returns list/public aggregator prices, say they are not verified sold prices.\n"
+    "- Do not mention an interactive map, file manager, generated file, download, attachment, report, or exported view unless the current tool response includes an actual generated_files item or downloadable link.\n"
 )
 
     if "mode:" in text.lower():
