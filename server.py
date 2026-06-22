@@ -1613,11 +1613,34 @@ def _request_needs_homeharvest(prompt_text: str) -> bool:
 
 
 def _looks_like_arcgis_lookup(prompt_text: str) -> bool:
-    """Detect a plain address/UPC/property lookup that can be answered by ArcGIS."""
+    """Detect a plain address/UPC/property lookup that can be answered by ArcGIS.
+
+    Important: do not require a perfect command phrase like "look up".
+    Copilot/user text can contain typos such as "ook up", or a user may paste
+    only an address/UPC. If a street address, UPC, PIN, or situs-like value can
+    be extracted and the request does not explicitly ask for comps/sales/listings
+    HomeHarvest, the lookup should stay on the fast ArcGIS-only path.
+    """
     text = (prompt_text or "").lower()
     search_text = _extract_arcgis_search_text_from_prompt(prompt_text)
-    lookup_words = ["look up", "lookup", "search", "find", "parcel", "property", "situs", "address", "owner", "upc", "pin"]
-    return bool(search_text) and any(word in text for word in lookup_words)
+    if not search_text:
+        return False
+
+    compact = _compact_digits(search_text)
+    if re.fullmatch(r"[0-9]{12,30}", compact):
+        return True
+
+    # Any extractable street-address/situs pattern should be treated as a
+    # parcel lookup unless the separate HomeHarvest detector sees comp/sale
+    # language. This handles ZIP+4 and minor typos in the command phrase.
+    if _normalize_arcgis_situs_from_user_text(search_text):
+        return True
+
+    lookup_words = [
+        "look up", "lookup", "ook up", "search", "find", "parcel",
+        "property", "situs", "address", "owner", "upc", "pin"
+    ]
+    return any(word in text for word in lookup_words)
 
 
 def _should_use_arcgis_only_lookup(prompt_text: str) -> bool:
