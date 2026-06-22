@@ -19,10 +19,12 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes five tools: Community_Educator, Assessment_Context_Expert, "
-        "Clear_Expectations, Compliance_Expert, and Check_CustomGPT_Task. "
-        "The four specialist tools take exactly one promptText string and return plain text. "
-        "Check_CustomGPT_Task takes projectId and taskId to retrieve a delayed task result."
+        "Exposes six tools: Community_Educator, Assessment_Context_Expert, "
+        "Clear_Expectations, Compliance_Expert, Check_CustomGPT_Task, "
+        "and ArcGIS_Public_Parcel_Lookup. "
+        "The four CustomGPT specialist tools take exactly one promptText string and return plain text. "
+        "Check_CustomGPT_Task takes projectId and taskId to retrieve a delayed task result. "
+        "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
     ),
 )
 
@@ -37,6 +39,21 @@ COMPLIANCE_PROJECT_ID = os.getenv("COMPLIANCE_PROJECT_ID", "").strip()
 
 # HomeHarvest External API action ID inside CustomGPT project 94006.
 HOMEHARVEST_ACTION_ID = os.getenv("HOMEHARVEST_ACTION_ID", "7").strip()
+
+# Public Bernalillo County Assessor parcel FeatureServer layer.
+# This is a fast, read-only GIS lookup path separate from HomeHarvest/CustomGPT.
+ARCGIS_PUBLIC_PARCEL_LAYER_URL = os.getenv(
+    "ARCGIS_PUBLIC_PARCEL_LAYER_URL",
+    "https://services.arcgis.com/CWv1abTnC3urn4bV/ArcGIS/rest/services/berncoparcels_forIDO/FeatureServer/0",
+).rstrip("/")
+ARCGIS_PUBLIC_PARCEL_MAX_RESULTS = int(os.getenv("ARCGIS_PUBLIC_PARCEL_MAX_RESULTS", "10"))
+
+# When true, Assessment_Context_Expert HomeHarvest/address/comps tasks are
+# pre-enriched with public ArcGIS parcel context before the CustomGPT task is
+# submitted. This lets HomeHarvest use the GIS subject parcel as an anchor.
+ENRICH_HOMEHARVEST_WITH_ARCGIS = os.getenv(
+    "ACES_ENRICH_HOMEHARVEST_WITH_ARCGIS", "true"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 # Optional admin token for viewing /task-cache and /check-task.
 ACES_ADMIN_TOKEN = os.getenv("ACES_ADMIN_TOKEN", "").strip()
@@ -555,6 +572,432 @@ def _require_rest_auth(request) -> Optional[JSONResponse]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# ArcGIS public parcel lookup helpers
+# ---------------------------------------------------------------------------
+
+ARCGIS_PUBLIC_PARCEL_OUT_FIELDS = (
+    "OBJECTID,UPC,TAXYR,OWNER,OWNADD,OWNADD2,"
+    "SITUSADD,SITUSADD2,LEGALDESC,VALCLASS,PROPCLASS,"
+    "ACREAGE,CompleteOwnerAddress,CompleteSiteAddress"
+)
+
+_ARCGIS_STREET_SUFFIX_REPLACEMENTS = {
+    "COURT": "CT",
+    "DRIVE": "DR",
+    "ROAD": "RD",
+    "STREET": "ST",
+    "AVENUE": "AVE",
+    "LANE": "LN",
+    "BOULEVARD": "BLVD",
+    "PLACE": "PL",
+    "CIRCLE": "CIR",
+    "TRAIL": "TRL",
+    "TERRACE": "TER",
+    "HIGHWAY": "HWY",
+    "PARKWAY": "PKWY",
+}
+
+_ARCGIS_CITY_TRAILING_WORDS = [
+    "ALBUQUERQUE",
+    "TIJERAS",
+    "CEDAR CREST",
+    "EDGEWOOD",
+    "LOS RANCHOS DE ALBUQUERQUE",
+    "LOS RANCHOS",
+    "CORRALES",
+    "ISLETA",
+    "SANDIA PARK",
+]
+
+
+def _clean_arcgis_sql_text(value: str) -> str:
+    """Normalize text for ArcGIS SQL where clauses and escape single quotes."""
+    cleaned = str(value or "").upper()
+    cleaned = cleaned.replace("NEW MEXICO", "NM")
+    cleaned = re.sub(r"[,;]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned.replace("'", "''")
+
+
+def _compact_digits(value: str) -> str:
+    return re.sub(r"[^0-9]", "", str(value or ""))
+
+
+def _normalize_arcgis_situs_from_user_text(search_text: str) -> str:
+    """
+    Convert a user-entered address into the public layer's SITUSADD style.
+    Example: '2 Lauren Taylor Court Tijeras NM 87059' -> '2 LAUREN TAYLOR CT'.
+    """
+    value = _clean_arcgis_sql_text(search_text)
+    if not re.match(r"^\d+\s+", value):
+        return ""
+
+    # Drop ZIP / ZIP+4 and trailing state tokens.
+    value = re.sub(r"\s+\d{5}(?:-\d{4})?\s*$", "", value).strip()
+    value = re.sub(r"\s+NM\s*$", "", value).strip()
+
+    # Drop common Bernalillo County city/community names when they appear at the end.
+    for city in sorted(_ARCGIS_CITY_TRAILING_WORDS, key=len, reverse=True):
+        if value.endswith(" " + city):
+            value = value[: -len(city)].strip()
+            break
+
+    parts = value.split()
+    if len(parts) >= 2:
+        last = parts[-1]
+        if last in _ARCGIS_STREET_SUFFIX_REPLACEMENTS:
+            parts[-1] = _ARCGIS_STREET_SUFFIX_REPLACEMENTS[last]
+        value = " ".join(parts)
+
+    return value.strip()
+
+
+def _arcgis_where_candidates(search_text: str) -> List[Tuple[str, str]]:
+    """
+    Return query candidates in safest order: UPC exact, SITUSADD exact,
+    full-address prefix, then broad fallback.
+    """
+    raw = str(search_text or "").strip()
+    safe = _clean_arcgis_sql_text(raw)
+    compact = _compact_digits(raw)
+    candidates: List[Tuple[str, str]] = []
+
+    if re.fullmatch(r"[0-9]{12,30}", compact):
+        candidates.append(("upc_exact", f"UPC = '{compact}'"))
+
+    situs = _normalize_arcgis_situs_from_user_text(raw)
+    if situs:
+        candidates.append(("situs_exact", f"SITUSADD = '{situs}'"))
+        candidates.append(("site_address_prefix", f"CompleteSiteAddress LIKE '{situs}%'"))
+
+    if safe:
+        candidates.append(
+            (
+                "broad_text",
+                " OR ".join(
+                    [
+                        f"CompleteSiteAddress LIKE '%{safe}%'",
+                        f"SITUSADD LIKE '%{safe}%'",
+                        f"SITUSADD2 LIKE '%{safe}%'",
+                        f"OWNER LIKE '%{safe}%'",
+                        f"UPC LIKE '%{safe}%'",
+                    ]
+                ),
+            )
+        )
+
+    # De-dupe while preserving order.
+    seen = set()
+    unique: List[Tuple[str, str]] = []
+    for mode, where in candidates:
+        if where not in seen:
+            seen.add(where)
+            unique.append((mode, where))
+    return unique
+
+
+def _normalize_arcgis_parcel(attrs: Dict[str, Any]) -> Dict[str, Any]:
+    owner_address = attrs.get("CompleteOwnerAddress") or " ".join(
+        part for part in [attrs.get("OWNADD"), attrs.get("OWNADD2")] if part
+    )
+    situs_address = attrs.get("CompleteSiteAddress") or " ".join(
+        part for part in [attrs.get("SITUSADD"), attrs.get("SITUSADD2")] if part
+    )
+    return {
+        "object_id": attrs.get("OBJECTID"),
+        "upc": attrs.get("UPC"),
+        "tax_year": attrs.get("TAXYR"),
+        "owner": attrs.get("OWNER"),
+        "owner_address": owner_address or None,
+        "situs_address": situs_address or None,
+        "legal_description": attrs.get("LEGALDESC"),
+        "valuation_class": attrs.get("VALCLASS"),
+        "property_class": attrs.get("PROPCLASS"),
+        "acreage": attrs.get("ACREAGE"),
+    }
+
+
+def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
+    status = str(result.get("status") or "")
+    answer = str(result.get("answer") or "").strip()
+    if status != "completed":
+        return answer or "ArcGIS parcel lookup did not return usable results."
+
+    lines = [
+        answer,
+        "Source: Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer.",
+        "Limit: Public GIS parcel context only. Verify final assessment details in iasWorld.",
+        "",
+    ]
+    for idx, item in enumerate(result.get("results") or [], start=1):
+        lines.extend(
+            [
+                f"{idx}. {item.get('situs_address') or 'Unknown situs address'}",
+                f"   UPC: {item.get('upc') or ''}",
+                f"   Tax Year: {item.get('tax_year') or ''}",
+                f"   Owner: {item.get('owner') or ''}",
+                f"   Owner Address: {item.get('owner_address') or ''}",
+                f"   Legal Description: {item.get('legal_description') or ''}",
+                f"   Valuation/Class: {item.get('valuation_class') or ''} / {item.get('property_class') or ''}",
+                f"   Acreage: {item.get('acreage') if item.get('acreage') is not None else ''}",
+                f"   OBJECTID: {item.get('object_id') or ''}",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+async def _arcgis_public_parcel_lookup_result(
+    search_text: str,
+    max_results: int = ARCGIS_PUBLIC_PARCEL_MAX_RESULTS,
+    return_geometry: bool = False,
+) -> Dict[str, Any]:
+    """Query the public BernCo parcel FeatureServer layer with exact-first fallback."""
+    search_text = str(search_text or "").strip()
+    if len(search_text) < 3:
+        return {
+            "status": "failed",
+            "answer": "Provide an address, UPC, parcel ID, or owner name with at least 3 characters.",
+            "task_id": "",
+            "project_id": "",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+            "results": [],
+        }
+
+    try:
+        max_results_int = max(1, min(int(max_results), 25))
+    except Exception:
+        max_results_int = ARCGIS_PUBLIC_PARCEL_MAX_RESULTS
+
+    candidates = _arcgis_where_candidates(search_text)
+    if not candidates:
+        return {
+            "status": "failed",
+            "answer": "Could not build an ArcGIS query from the supplied search text.",
+            "task_id": "",
+            "project_id": "",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+            "results": [],
+        }
+
+    timeout = httpx.Timeout(connect=10, read=25, write=20, pool=10)
+    last_error: Optional[Any] = None
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for query_mode, where_clause in candidates:
+            params = {
+                "f": "json",
+                "where": where_clause,
+                "outFields": ARCGIS_PUBLIC_PARCEL_OUT_FIELDS,
+                "returnGeometry": "true" if return_geometry else "false",
+                "resultRecordCount": str(max_results_int),
+            }
+            if return_geometry:
+                # Layer coordinates are WKID 2903; use WGS84 when geometry is requested.
+                params["outSR"] = "4326"
+
+            try:
+                response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params)
+                data = await _read_json_or_text(response)
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+
+            if response.status_code >= 400:
+                last_error = {"http_status": response.status_code, "response": data}
+                continue
+
+            if isinstance(data, dict) and data.get("error"):
+                last_error = data.get("error")
+                continue
+
+            features = data.get("features", []) if isinstance(data, dict) else []
+            if not features:
+                continue
+
+            results = [_normalize_arcgis_parcel(feature.get("attributes", {}) or {}) for feature in features]
+            count = len(results)
+            exact_note = "" if count == 1 else " Broad or fallback search returned multiple possible matches."
+            transfer_note = " ArcGIS indicated there may be more matches than returned." if isinstance(data, dict) and data.get("exceededTransferLimit") else ""
+            return {
+                "status": "completed",
+                "answer": (
+                    f"Found {count} public ArcGIS parcel match(es). "
+                    "Verify final assessment details in iasWorld before relying on them."
+                    f"{exact_note}{transfer_note}"
+                ).strip(),
+                "task_id": "",
+                "project_id": "",
+                "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+                "layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
+                "query_mode": query_mode,
+                "where": where_clause,
+                "count": count,
+                "results": results,
+            }
+
+    if last_error:
+        return {
+            "status": "failed",
+            "answer": f"ArcGIS REST lookup failed or returned an error: {_safe_json_dumps(last_error, 1200)}",
+            "task_id": "",
+            "project_id": "",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+            "results": [],
+        }
+
+    return {
+        "status": "empty",
+        "answer": "No matching public ArcGIS parcel records were found.",
+        "task_id": "",
+        "project_id": "",
+        "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+        "query_mode": candidates[-1][0] if candidates else "none",
+        "where": candidates[-1][1] if candidates else "",
+        "results": [],
+    }
+
+
+
+def _extract_arcgis_search_text_from_prompt(prompt_text: str) -> str:
+    """
+    Pull the best address/UPC search value out of an A.C.E.S/HomeHarvest prompt.
+    Prefer labeled address blocks, then the first street-address pattern, then UPC.
+    """
+    text = str(prompt_text or "")
+
+    for label in ["Address/search area:", "Address:", "Situs:", "Subject address:"]:
+        block = _extract_label_block(
+            text,
+            label,
+            ["Staff request:", "Instructions:", "Uploaded record transcription:", "HOMEHARVEST ACTION RULE:", "COMP SEARCH QUALITY RULES:"],
+        )
+        if block:
+            candidate = block.strip().splitlines()[0].strip(" -")
+            if candidate:
+                return candidate
+
+    compact = _compact_digits(text)
+    if re.fullmatch(r"[0-9]{12,30}", compact):
+        return compact
+
+    street_suffix = (
+        r"ct|court|dr|drive|rd|road|st|street|ave|avenue|ln|lane|way|"
+        r"blvd|boulevard|pl|place|cir|circle|trl|trail|ter|terrace|hwy|highway|pkwy|parkway"
+    )
+    match = re.search(
+        rf"\b\d{{1,6}}\s+[A-Za-z0-9 .'-]{{2,80}}?\s+(?:{street_suffix})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        return re.sub(r"\s+", " ", match.group(0)).strip(" ,")
+
+    stripped = text.strip()
+    if stripped and len(stripped) <= 160:
+        return stripped
+    return ""
+
+
+def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: str) -> str:
+    """Create a compact prompt block that CustomGPT/HomeHarvest can use as subject context."""
+    status = str(result.get("status") or "")
+    lines = [
+        "PUBLIC ARCGIS PARCEL CONTEXT:",
+        "- Source: Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer.",
+        "- Use: Subject parcel/GIS context only; verify final assessment details in iasWorld.",
+        "- Do not treat GIS attributes as verified sale prices, exemption status, tax status, or a certified record.",
+        f"- Search used: {search_text}",
+        f"- GIS lookup status: {status or 'unknown'}",
+    ]
+
+    if status == "completed":
+        results = result.get("results") or []
+        lines.append(f"- Match count: {len(results)}")
+        if len(results) == 1:
+            item = results[0]
+            lines.extend(
+                [
+                    "- Subject anchor: exact/single public GIS match.",
+                    f"- UPC: {item.get('upc') or ''}",
+                    f"- Tax year: {item.get('tax_year') or ''}",
+                    f"- Situs address: {item.get('situs_address') or ''}",
+                    f"- Owner: {item.get('owner') or ''}",
+                    f"- Owner address: {item.get('owner_address') or ''}",
+                    f"- Legal description: {item.get('legal_description') or ''}",
+                    f"- Valuation class: {item.get('valuation_class') or ''}",
+                    f"- Property class: {item.get('property_class') or ''}",
+                    f"- Acreage: {item.get('acreage') if item.get('acreage') is not None else ''}",
+                    f"- OBJECTID: {item.get('object_id') or ''}",
+                ]
+            )
+        else:
+            lines.append("- Subject anchor: multiple public GIS candidates; ask/choose carefully and do not assume one is correct.")
+            for idx, item in enumerate(results[:5], start=1):
+                lines.append(
+                    f"  {idx}. {item.get('situs_address') or 'Unknown situs'} | "
+                    f"UPC {item.get('upc') or ''} | "
+                    f"Class {item.get('valuation_class') or ''}/{item.get('property_class') or ''} | "
+                    f"Acreage {item.get('acreage') if item.get('acreage') is not None else ''}"
+                )
+        where = result.get("where")
+        mode = result.get("query_mode")
+        if where:
+            lines.append(f"- ArcGIS query mode: {mode}; where: {where}")
+    else:
+        lines.extend(
+            [
+                f"- ArcGIS answer: {result.get('answer') or 'No usable GIS context.'}",
+                "- Continue with HomeHarvest if the staff request requires market/listing/comps data, but state that GIS context was not found.",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "GIS + HOMEHARVEST INSTRUCTIONS:",
+            "- Use the GIS parcel as the subject anchor when a single match is present.",
+            "- For HomeHarvest comps, search around the GIS situs address and prefer residential results consistent with property class, valuation class, acreage, and location when available.",
+            "- Return the GIS subject context first, then the unofficial HomeHarvest/public-aggregator results.",
+            "- Clearly label HomeHarvest results as unofficial public-aggregator candidates, not verified sales or final appraisal comps.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
+    """Prepend public ArcGIS parcel context to HomeHarvest/address/comps prompts."""
+    text = str(prompt_text or "")
+    if not ENRICH_HOMEHARVEST_WITH_ARCGIS:
+        return text
+    if "PUBLIC ARCGIS PARCEL CONTEXT:" in text:
+        return text
+
+    search_text = _extract_arcgis_search_text_from_prompt(text)
+    if not search_text:
+        return text + "\n\nPUBLIC ARCGIS PARCEL CONTEXT:\n- ArcGIS pre-check was not run because no address or UPC could be extracted."
+
+    try:
+        gis_result = await _arcgis_public_parcel_lookup_result(search_text=search_text, max_results=5, return_geometry=False)
+        context_block = _format_arcgis_context_for_homeharvest(gis_result, search_text)
+        _log(
+            "ArcGIS pre-check for HomeHarvest",
+            status=gis_result.get("status"),
+            count=gis_result.get("count"),
+            query_mode=gis_result.get("query_mode"),
+        )
+        return text + "\n\n" + context_block
+    except Exception as exc:
+        _log("ArcGIS pre-check failed", error=str(exc))
+        return (
+            text
+            + "\n\nPUBLIC ARCGIS PARCEL CONTEXT:\n"
+            + f"- ArcGIS pre-check failed before HomeHarvest submission: {exc}\n"
+            + "- Continue with HomeHarvest if the request requires public aggregator/comps data and disclose that GIS pre-check failed."
+        )
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
     return JSONResponse(
@@ -562,9 +1005,11 @@ async def health_check(request):
             "status": "healthy",
             "service": "aces-mcp-server",
             "mcp_endpoint": "/mcp",
-            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call"],
+            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup"],
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
             "homeharvest_action_id": HOMEHARVEST_ACTION_ID,
+            "arcgis_public_parcel_layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
+            "enrich_homeharvest_with_arcgis": ENRICH_HOMEHARVEST_WITH_ARCGIS,
             "stateless_http": os.getenv("FASTMCP_STATELESS_HTTP", ""),
             "json_response": os.getenv("FASTMCP_JSON_RESPONSE", ""),
             "task_cache_file": TASK_CACHE_FILE,
@@ -584,6 +1029,7 @@ async def health_check(request):
                 "Clear_Expectations",
                 "Compliance_Expert",
                 "Check_CustomGPT_Task",
+                "ArcGIS_Public_Parcel_Lookup",
             ],
         }
     )
@@ -627,6 +1073,65 @@ async def check_task_route(request):
 
     result = await _check_customgpt_task_result(project_id=project_id, task_id=task_id)
     return JSONResponse({"project_id": project_id, "task_id": task_id, "result": result})
+
+
+@mcp.custom_route("/arcgis-parcel-lookup", methods=["GET", "POST"])
+async def arcgis_parcel_lookup_route(request):
+    """
+    Fast read-only REST wrapper for the public BernCo ArcGIS parcel layer.
+
+    POST /arcgis-parcel-lookup
+    Headers:
+      x-aces-admin-token: <ACES_ADMIN_TOKEN>
+      Content-Type: application/json
+    Body:
+      {"searchText": "2 Lauren Taylor Ct Tijeras NM", "maxResults": 10}
+
+    Also supports GET:
+      /arcgis-parcel-lookup?searchText=2%20Lauren%20Taylor%20Ct%20Tijeras%20NM&maxResults=10
+    """
+    auth_response = _require_rest_auth(request)
+    if auth_response:
+        return auth_response
+
+    if request.method == "GET":
+        body: Dict[str, Any] = {}
+    else:
+        body = await _request_json_or_empty(request)
+
+    search_text = str(
+        body.get("searchText")
+        or body.get("search_text")
+        or body.get("promptText")
+        or body.get("prompt_text")
+        or request.query_params.get("searchText")
+        or request.query_params.get("search_text")
+        or request.query_params.get("promptText")
+        or ""
+    ).strip()
+
+    max_results_raw = (
+        body.get("maxResults")
+        or body.get("max_results")
+        or request.query_params.get("maxResults")
+        or request.query_params.get("max_results")
+        or ARCGIS_PUBLIC_PARCEL_MAX_RESULTS
+    )
+    return_geometry_raw = str(
+        body.get("returnGeometry")
+        or body.get("return_geometry")
+        or request.query_params.get("returnGeometry")
+        or request.query_params.get("return_geometry")
+        or "false"
+    ).strip().lower()
+    return_geometry = return_geometry_raw in {"1", "true", "yes", "on"}
+
+    result = await _arcgis_public_parcel_lookup_result(
+        search_text=search_text,
+        max_results=max_results_raw,
+        return_geometry=return_geometry,
+    )
+    return JSONResponse(result)
 
 
 
@@ -773,6 +1278,10 @@ async def agent_call_route(request):
     if not prompt_text:
         return JSONResponse({"status": "failed", "answer": "Missing promptText.", "task_id": "", "project_id": ""})
 
+    if agent in {"ArcGIS_Public_Parcel_Lookup", "ArcGIS_Public_Parcel", "ArcGIS", "ArcGIS_Parcel_Lookup"}:
+        result = await _arcgis_public_parcel_lookup_result(prompt_text)
+        return JSONResponse(result)
+
     agent_map = {
         "Community_Educator": (COMMUNITY_PROJECT_ID, "Community_Educator", None, DEFAULT_POLL_SECONDS),
         "Clear_Expectations": (CLEAR_PROJECT_ID, "Clear_Expectations", None, DEFAULT_POLL_SECONDS),
@@ -789,7 +1298,7 @@ async def agent_call_route(request):
         return JSONResponse(
             {
                 "status": "failed",
-                "answer": "Invalid agent. Use Community_Educator, Assessment_Context_Expert, Clear_Expectations, or Compliance_Expert.",
+                "answer": "Invalid agent. Use Community_Educator, Assessment_Context_Expert, Clear_Expectations, Compliance_Expert, or ArcGIS_Public_Parcel_Lookup.",
                 "task_id": "",
                 "project_id": "",
             }
@@ -885,6 +1394,12 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "- Use POST /properties/search.\n"
     "- Return staff-readable numbered cards, not raw JSON.\n"
     "- A no-result response is not a tool failure.\n"
+    "\n"
+    "GIS + HOMEHARVEST RULES:\n"
+    "- If a PUBLIC ARCGIS PARCEL CONTEXT block is present, use it as the subject parcel anchor.\n"
+    "- Return the GIS subject context first, then HomeHarvest/public-aggregator candidate results.\n"
+    "- Do not treat GIS data as a verified sale, tax status, exemption status, or certified record.\n"
+    "- Verify final parcel/account details in iasWorld before relying on them.\n"
     "\n"
     "COMP SEARCH QUALITY RULES:\n"
     "- For comp requests, use listing_type=sold or sold status when supported.\n"
@@ -1325,6 +1840,9 @@ async def _call_customgpt_task(
         return f"{tool_name} received an empty promptText."
 
     if tool_name == "Assessment_Context_Expert" and action_id:
+        # ArcGIS runs first as a fast public parcel pre-check, then the combined
+        # prompt is enriched with HomeHarvest instructions and submitted to CustomGPT.
+        prompt_text = await _enrich_homeharvest_prompt_with_arcgis(prompt_text)
         prompt_text = _enrich_homeharvest_prompt(prompt_text)
 
     _log("specialist tool received prompt", tool=tool_name, project=project_id, action_id=action_id or "", prompt_preview=_safe_json_dumps(prompt_text[:800], 900))
@@ -1511,7 +2029,7 @@ async def Community_Educator(promptText: str) -> str:
 async def Assessment_Context_Expert(promptText: str) -> str:
     """
     Use for address, situs, parcel/account, owner/property lookup, PRC, OD report,
-    iasWorld export, property record card, HomeHarvest, comps, sales, values,
+    iasWorld export, property record card, ArcGIS public parcel pre-check, HomeHarvest, comps, sales, values,
     exemptions on a record, record interpretation, and assessment context.
     Takes exactly one parameter: promptText.
     """
@@ -1544,6 +2062,19 @@ async def Compliance_Expert(promptText: str) -> str:
     and legal risk. Takes exactly one parameter: promptText.
     """
     return await _call_customgpt_conversation(COMPLIANCE_PROJECT_ID, promptText, "Compliance_Expert")
+
+
+@mcp.tool
+async def ArcGIS_Public_Parcel_Lookup(searchText: str, maxResults: int = 10) -> str:
+    """
+    Use for fast read-only public Bernalillo County ArcGIS parcel lookup by situs
+    address, UPC/parcel ID, or owner text. Returns public GIS parcel context only:
+    UPC, tax year, owner, owner address, situs address, legal description,
+    valuation class, property class, and acreage. Not a certified assessment
+    record and not a replacement for iasWorld verification.
+    """
+    result = await _arcgis_public_parcel_lookup_result(searchText, maxResults)
+    return _format_arcgis_parcel_lookup_text(result)
 
 
 @mcp.tool
