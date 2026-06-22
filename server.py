@@ -400,6 +400,161 @@ def _admin_authorized(request) -> bool:
     return supplied_token == ACES_ADMIN_TOKEN
 
 
+
+
+def _extract_id_from_text(text: str, label: str) -> str:
+    """Extract an ID from a plain-text status block like 'Task ID: ...'."""
+    pattern = re.compile(rf"(?im)^\s*{re.escape(label)}\s*:\s*([^\s]+)\s*$")
+    match = pattern.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _normalize_aces_result(
+    result_text: Any,
+    project_id: str = "",
+    task_id: str = "",
+    default_failed_answer: str = "The lookup did not return usable results.",
+) -> Dict[str, str]:
+    """
+    Convert existing MCP/plain-text tool results into the stable JSON contract
+    Power Automate/Copilot Studio expects:
+      status, answer, task_id, project_id
+
+    Existing MCP tools return plain text. Long-running CustomGPT tasks include
+    lines such as 'Task ID:' and 'Project ID:'. This helper preserves that text
+    as the answer while exposing machine-readable status and IDs.
+    """
+    answer = str(result_text or "").strip()
+    lower = answer.lower()
+
+    extracted_task_id = _extract_id_from_text(answer, "Task ID")
+    extracted_project_id = _extract_id_from_text(answer, "Project ID")
+
+    final_task_id = str(task_id or extracted_task_id or "").strip()
+    final_project_id = str(project_id or extracted_project_id or ASSESSMENT_PROJECT_ID or "").strip()
+
+    if not answer:
+        return {
+            "status": "failed",
+            "answer": default_failed_answer,
+            "task_id": final_task_id,
+            "project_id": final_project_id,
+        }
+
+    # Still running / polling language produced by _format_still_running_response
+    # and _check_customgpt_task_result.
+    still_processing_markers = [
+        "still running",
+        "not complete yet",
+        "use check_customgpt_task",
+        "latest status: submitted",
+        "latest status: pending",
+        "latest status: running",
+        "latest status: processing",
+        "latest status: queued",
+    ]
+    if any(marker in lower for marker in still_processing_markers):
+        return {
+            "status": "still_processing",
+            "answer": answer,
+            "task_id": final_task_id,
+            "project_id": final_project_id,
+        }
+
+    task_not_found_markers = [
+        "task not found",
+        "not found",
+        "404",
+        "consumed",
+        "expired",
+    ]
+    if any(marker in lower for marker in task_not_found_markers):
+        return {
+            "status": "task_not_found",
+            "answer": answer,
+            "task_id": final_task_id,
+            "project_id": final_project_id,
+        }
+
+    failed_markers = [
+        "missing customgpt_api_token",
+        "missing project id",
+        "missing taskid",
+        "missing task id",
+        "missing task_id",
+        "task submit failed",
+        "task poll failed",
+        "task failed",
+        "task check failed",
+        "final retrieval failed",
+        "final message fetch failed",
+        "completed but no message_id",
+        "final answer was empty",
+        "did not return a task id",
+        "received an empty prompttext",
+    ]
+    if any(marker in lower for marker in failed_markers):
+        return {
+            "status": "failed",
+            "answer": answer,
+            "task_id": final_task_id,
+            "project_id": final_project_id,
+        }
+
+    return {
+        "status": "completed",
+        "answer": answer,
+        "task_id": final_task_id,
+        "project_id": final_project_id,
+    }
+
+
+async def _request_json_or_empty(request) -> Dict[str, Any]:
+    """Read JSON safely from Starlette request; return {} for empty/invalid JSON."""
+    try:
+        data = await request.json()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _json_unauthorized(message: str = "Unauthorized. Supply x-aces-admin-token header or ?token=...") -> JSONResponse:
+    return JSONResponse(
+        {
+            "status": "failed",
+            "answer": message,
+            "task_id": "",
+            "project_id": "",
+        },
+        status_code=401,
+    )
+
+
+def _json_not_configured(message: str = "Set ACES_ADMIN_TOKEN in Render to enable REST wrapper routes.") -> JSONResponse:
+    return JSONResponse(
+        {
+            "status": "failed",
+            "answer": message,
+            "task_id": "",
+            "project_id": "",
+        },
+        status_code=403,
+    )
+
+
+def _require_rest_auth(request) -> Optional[JSONResponse]:
+    """
+    Protect Power Automate REST wrapper routes. Put the same token in your
+    Power Automate HTTP action headers:
+      x-aces-admin-token: <ACES_ADMIN_TOKEN>
+    """
+    if not ACES_ADMIN_TOKEN:
+        return _json_not_configured()
+    if not _admin_authorized(request):
+        return _json_unauthorized()
+    return None
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
     return JSONResponse(
@@ -407,6 +562,7 @@ async def health_check(request):
             "status": "healthy",
             "service": "aces-mcp-server",
             "mcp_endpoint": "/mcp",
+            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call"],
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
             "homeharvest_action_id": HOMEHARVEST_ACTION_ID,
             "stateless_http": os.getenv("FASTMCP_STATELESS_HTTP", ""),
@@ -471,6 +627,190 @@ async def check_task_route(request):
 
     result = await _check_customgpt_task_result(project_id=project_id, task_id=task_id)
     return JSONResponse({"project_id": project_id, "task_id": task_id, "result": result})
+
+
+
+@mcp.custom_route("/start-lookup", methods=["POST"])
+async def start_lookup_route(request):
+    """
+    REST wrapper for Power Automate/Copilot Studio.
+
+    POST /start-lookup
+    Headers:
+      x-aces-admin-token: <ACES_ADMIN_TOKEN>
+      Content-Type: application/json
+    Body:
+      {"promptText": "look up 2 Lauren Taylor Ct Tijeras NM and find 10 comps"}
+
+    Returns:
+      {"status":"completed|still_processing|failed|task_not_found",
+       "answer":"...",
+       "task_id":"...",
+       "project_id":"94006"}
+    """
+    auth_response = _require_rest_auth(request)
+    if auth_response:
+        return auth_response
+
+    body = await _request_json_or_empty(request)
+    prompt_text = str(body.get("promptText") or body.get("prompt_text") or "").strip()
+
+    if not prompt_text:
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": "Missing promptText.",
+                "task_id": "",
+                "project_id": ASSESSMENT_PROJECT_ID,
+            }
+        )
+
+    try:
+        action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(prompt_text) else None
+        poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else DEFAULT_POLL_SECONDS
+        raw_result = await _call_customgpt_task(
+            ASSESSMENT_PROJECT_ID,
+            prompt_text,
+            "Assessment_Context_Expert",
+            action_id=action_id,
+            poll_seconds=poll_seconds,
+        )
+        normalized = _normalize_aces_result(raw_result, project_id=ASSESSMENT_PROJECT_ID)
+        return JSONResponse(normalized)
+    except Exception as exc:
+        _log("start_lookup_route exception", error=str(exc))
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": f"The lookup did not return usable results. Error: {exc}",
+                "task_id": "",
+                "project_id": ASSESSMENT_PROJECT_ID,
+            }
+        )
+
+
+@mcp.custom_route("/check-pending-task", methods=["GET", "POST"])
+async def check_pending_task_route(request):
+    """
+    Normalized REST wrapper for polling an existing CustomGPT task.
+
+    POST /check-pending-task
+    Body:
+      {"task_id":"...", "project_id":"94006"}
+
+    Also supports GET:
+      /check-pending-task?project_id=94006&task_id=...
+    """
+    auth_response = _require_rest_auth(request)
+    if auth_response:
+        return auth_response
+
+    if request.method == "GET":
+        body: Dict[str, Any] = {}
+    else:
+        body = await _request_json_or_empty(request)
+
+    project_id = str(
+        body.get("project_id")
+        or body.get("projectId")
+        or request.query_params.get("project_id")
+        or request.query_params.get("projectId")
+        or ASSESSMENT_PROJECT_ID
+    ).strip()
+    task_id = str(
+        body.get("task_id")
+        or body.get("taskId")
+        or request.query_params.get("task_id")
+        or request.query_params.get("taskId")
+        or ""
+    ).strip()
+
+    if not task_id:
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": "Missing task_id.",
+                "task_id": "",
+                "project_id": project_id,
+            }
+        )
+
+    try:
+        raw_result = await _check_customgpt_task_result(project_id=project_id, task_id=task_id)
+        normalized = _normalize_aces_result(raw_result, project_id=project_id, task_id=task_id)
+        return JSONResponse(normalized)
+    except Exception as exc:
+        _log("check_pending_task_route exception", project_id=project_id, task_id=task_id, error=str(exc))
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": f"The pending lookup did not return usable results. Error: {exc}",
+                "task_id": task_id,
+                "project_id": project_id,
+            }
+        )
+
+
+@mcp.custom_route("/agent-call", methods=["POST"])
+async def agent_call_route(request):
+    """
+    Optional normalized REST wrapper for the non-lookup A.C.E.S. specialist agents.
+
+    Body:
+      {"agent":"Community_Educator|Clear_Expectations|Compliance_Expert|Assessment_Context_Expert",
+       "promptText":"..."}
+
+    For Assessment_Context_Expert address/comps work, prefer /start-lookup.
+    """
+    auth_response = _require_rest_auth(request)
+    if auth_response:
+        return auth_response
+
+    body = await _request_json_or_empty(request)
+    agent = str(body.get("agent") or body.get("tool") or "").strip()
+    prompt_text = str(body.get("promptText") or body.get("prompt_text") or "").strip()
+
+    if not prompt_text:
+        return JSONResponse({"status": "failed", "answer": "Missing promptText.", "task_id": "", "project_id": ""})
+
+    agent_map = {
+        "Community_Educator": (COMMUNITY_PROJECT_ID, "Community_Educator", None, DEFAULT_POLL_SECONDS),
+        "Clear_Expectations": (CLEAR_PROJECT_ID, "Clear_Expectations", None, DEFAULT_POLL_SECONDS),
+        "Compliance_Expert": (COMPLIANCE_PROJECT_ID, "Compliance_Expert", None, DEFAULT_POLL_SECONDS),
+        "Assessment_Context_Expert": (
+            ASSESSMENT_PROJECT_ID,
+            "Assessment_Context_Expert",
+            HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(prompt_text) else None,
+            HOMEHARVEST_POLL_SECONDS if _should_enable_homeharvest(prompt_text) else DEFAULT_POLL_SECONDS,
+        ),
+    }
+
+    if agent not in agent_map:
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": "Invalid agent. Use Community_Educator, Assessment_Context_Expert, Clear_Expectations, or Compliance_Expert.",
+                "task_id": "",
+                "project_id": "",
+            }
+        )
+
+    project_id, tool_name, action_id, poll_seconds = agent_map[agent]
+    try:
+        raw_result = await _call_customgpt_task(project_id, prompt_text, tool_name, action_id=action_id, poll_seconds=poll_seconds)
+        return JSONResponse(_normalize_aces_result(raw_result, project_id=project_id))
+    except Exception as exc:
+        _log("agent_call_route exception", agent=agent, error=str(exc))
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": f"{agent} did not return usable results. Error: {exc}",
+                "task_id": "",
+                "project_id": str(project_id or ""),
+            }
+        )
+
+
 
 
 def _require_config(project_id: str, tool_name: str) -> Optional[str]:
