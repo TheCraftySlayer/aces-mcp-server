@@ -40,11 +40,12 @@ COMPLIANCE_PROJECT_ID = os.getenv("COMPLIANCE_PROJECT_ID", "").strip()
 # HomeHarvest External API action ID inside CustomGPT project 94006.
 HOMEHARVEST_ACTION_ID = os.getenv("HOMEHARVEST_ACTION_ID", "7").strip()
 
-# Public Bernalillo County Assessor parcel FeatureServer layer.
-# This is a fast, read-only GIS lookup path separate from HomeHarvest/CustomGPT.
+# Public Bernalillo County Assessor parcel layer.
+# Default is the richer BernCo public MapServer layer. You can override this
+# with ARCGIS_PUBLIC_PARCEL_LAYER_URL in Render if GIS publishes a new URL.
 ARCGIS_PUBLIC_PARCEL_LAYER_URL = os.getenv(
     "ARCGIS_PUBLIC_PARCEL_LAYER_URL",
-    "https://services.arcgis.com/CWv1abTnC3urn4bV/ArcGIS/rest/services/berncoparcels_forIDO/FeatureServer/0",
+    "https://assessormap.bernco.gov/server/rest/services/GIS/Assessor_Parcels_Public/MapServer/0",
 ).rstrip("/")
 ARCGIS_PUBLIC_PARCEL_MAX_RESULTS = int(os.getenv("ARCGIS_PUBLIC_PARCEL_MAX_RESULTS", "10"))
 
@@ -576,11 +577,10 @@ def _require_rest_auth(request) -> Optional[JSONResponse]:
 # ArcGIS public parcel lookup helpers
 # ---------------------------------------------------------------------------
 
-ARCGIS_PUBLIC_PARCEL_OUT_FIELDS = (
-    "OBJECTID,UPC,TAXYR,OWNER,OWNADD,OWNADD2,"
-    "SITUSADD,SITUSADD2,LEGALDESC,VALCLASS,PROPCLASS,"
-    "ACREAGE,CompleteOwnerAddress,CompleteSiteAddress"
-)
+# Use * so the tool works against both the older hosted FeatureServer and the
+# richer BernCo MapServer schema. The REST response is normalized before it is
+# returned to Copilot, and geometry is disabled by default.
+ARCGIS_PUBLIC_PARCEL_OUT_FIELDS = "*"
 
 _ARCGIS_STREET_SUFFIX_REPLACEMENTS = {
     "COURT": "CT",
@@ -626,22 +626,31 @@ def _compact_digits(value: str) -> str:
 
 def _normalize_arcgis_situs_from_user_text(search_text: str) -> str:
     """
-    Convert a user-entered address into the public layer's SITUSADD style.
+    Convert a user-entered address into the parcel layer's SITUSADD style.
     Example: '2 Lauren Taylor Court Tijeras NM 87059' -> '2 LAUREN TAYLOR CT'.
+
+    This intentionally stops at the street suffix so typos in the city, such as
+    'Tijersa', do not get included in the exact SITUSADD query.
     """
     value = _clean_arcgis_sql_text(search_text)
     if not re.match(r"^\d+\s+", value):
         return ""
 
-    # Drop ZIP / ZIP+4 and trailing state tokens.
-    value = re.sub(r"\s+\d{5}(?:-\d{4})?\s*$", "", value).strip()
-    value = re.sub(r"\s+NM\s*$", "", value).strip()
+    suffix_values = set(_ARCGIS_STREET_SUFFIX_REPLACEMENTS.keys()) | set(_ARCGIS_STREET_SUFFIX_REPLACEMENTS.values()) | {"WAY"}
+    suffix_pattern = "|".join(sorted((re.escape(s) for s in suffix_values), key=len, reverse=True))
 
-    # Drop common Bernalillo County city/community names when they appear at the end.
-    for city in sorted(_ARCGIS_CITY_TRAILING_WORDS, key=len, reverse=True):
-        if value.endswith(" " + city):
-            value = value[: -len(city)].strip()
-            break
+    # Prefer the first complete street-address span: house number + street + suffix.
+    match = re.search(rf"\b(\d{{1,6}}\s+[A-Z0-9 .'-]{{1,90}}?\s+(?:{suffix_pattern}))\b", value)
+    if match:
+        value = match.group(1).strip()
+    else:
+        # Fallback: drop ZIP/state/city from the right side.
+        value = re.sub(r"\s+\d{5}(?:-\d{4})?\s*$", "", value).strip()
+        value = re.sub(r"\s+NM\s*$", "", value).strip()
+        for city in sorted(_ARCGIS_CITY_TRAILING_WORDS, key=len, reverse=True):
+            if value.endswith(" " + city):
+                value = value[: -len(city)].strip()
+                break
 
     parts = value.split()
     if len(parts) >= 2:
@@ -664,24 +673,28 @@ def _arcgis_where_candidates(search_text: str) -> List[Tuple[str, str]]:
     candidates: List[Tuple[str, str]] = []
 
     if re.fullmatch(r"[0-9]{12,30}", compact):
-        candidates.append(("upc_exact", f"UPC = '{compact}'"))
+        # UPC exists in both public layers. TXTUPC/PIN exist in the richer BernCo MapServer.
+        candidates.append(("upc_exact", f"UPC = '{compact}' OR TXTUPC = '{compact}' OR PIN = '{compact}'"))
 
     situs = _normalize_arcgis_situs_from_user_text(raw)
     if situs:
+        # SITUSADD exists in both public layers. Avoid CompleteSiteAddress here
+        # because the richer MapServer does not expose that field.
         candidates.append(("situs_exact", f"SITUSADD = '{situs}'"))
-        candidates.append(("site_address_prefix", f"CompleteSiteAddress LIKE '{situs}%'"))
+        candidates.append(("situs_prefix", f"SITUSADD LIKE '{situs}%'"))
 
     if safe:
+        # Use only fields that exist in the richer public MapServer.
         candidates.append(
             (
                 "broad_text",
                 " OR ".join(
                     [
-                        f"CompleteSiteAddress LIKE '%{safe}%'",
                         f"SITUSADD LIKE '%{safe}%'",
                         f"SITUSADD2 LIKE '%{safe}%'",
                         f"OWNER LIKE '%{safe}%'",
                         f"UPC LIKE '%{safe}%'",
+                        f"LEGALDESC LIKE '%{safe}%'",
                     ]
                 ),
             )
@@ -704,17 +717,52 @@ def _normalize_arcgis_parcel(attrs: Dict[str, Any]) -> Dict[str, Any]:
     situs_address = attrs.get("CompleteSiteAddress") or " ".join(
         part for part in [attrs.get("SITUSADD"), attrs.get("SITUSADD2")] if part
     )
+    acreage = attrs.get("ACREAGE")
+    if acreage is None:
+        acreage = attrs.get("INTACRES")
+    if acreage is None:
+        acreage = attrs.get("PAR_CALCAC")
+
+    year_built = attrs.get("DWEL_YRBLT") or attrs.get("COM_YRBLT")
+
+    values = {
+        "land_value": attrs.get("LANDVALUE"),
+        "ag_value": attrs.get("AGVALUE"),
+        "improvement_value": attrs.get("IMPTVALUE"),
+        "total_value": attrs.get("TOTVALUE"),
+        "land_taxable": attrs.get("LANDTXBLE"),
+        "improvement_taxable": attrs.get("IMPTTXBLE"),
+        "total_taxable": attrs.get("TOTTXBLE"),
+        "head_of_household_exemption": attrs.get("HOHEXEMP"),
+        "veteran_exemption": attrs.get("VETEXEMP"),
+        "other_exemption": attrs.get("OTHEREXEMP"),
+        "total_exemption": attrs.get("TOTALEXEMP"),
+        "net_taxable": attrs.get("NETTAXABLE"),
+    }
+    values = {key: value for key, value in values.items() if value is not None}
+
     return {
         "object_id": attrs.get("OBJECTID"),
-        "upc": attrs.get("UPC"),
-        "tax_year": attrs.get("TAXYR"),
+        "upc": attrs.get("UPC") or attrs.get("TXTUPC"),
+        "tax_year": attrs.get("TAXYR") or attrs.get("INTTAXYR"),
         "owner": attrs.get("OWNER"),
         "owner_address": owner_address or None,
         "situs_address": situs_address or None,
         "legal_description": attrs.get("LEGALDESC"),
+        "roll_type": attrs.get("ROLLTYPE"),
         "valuation_class": attrs.get("VALCLASS"),
         "property_class": attrs.get("PROPCLASS"),
-        "acreage": attrs.get("ACREAGE"),
+        "land_use_code": attrs.get("LUC"),
+        "land_use_description": attrs.get("LUC_MSG") or attrs.get("C_DESCR"),
+        "style": attrs.get("STYLE"),
+        "year_built": year_built,
+        "acreage": acreage,
+        "pin": attrs.get("PIN"),
+        "pid": attrs.get("PID"),
+        "tid": attrs.get("TID"),
+        "x_coord": attrs.get("X_Coord"),
+        "y_coord": attrs.get("Y_Coord"),
+        "assessment_values": values or None,
     }
 
 
@@ -726,7 +774,7 @@ def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
 
     lines = [
         answer,
-        "Source: Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer.",
+        "Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
         "Limit: Public GIS parcel context only. Verify final assessment details in iasWorld.",
         "",
     ]
@@ -739,8 +787,10 @@ def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
                 f"   Owner: {item.get('owner') or ''}",
                 f"   Owner Address: {item.get('owner_address') or ''}",
                 f"   Legal Description: {item.get('legal_description') or ''}",
-                f"   Valuation/Class: {item.get('valuation_class') or ''} / {item.get('property_class') or ''}",
-                f"   Acreage: {item.get('acreage') if item.get('acreage') is not None else ''}",
+                f"   Roll/Class: {item.get('roll_type') or ''} / {item.get('valuation_class') or ''} / {item.get('property_class') or ''}",
+                f"   Land Use/Style: {item.get('land_use_code') or ''} {item.get('land_use_description') or ''} / {item.get('style') or ''}",
+                f"   Built/Acres: {item.get('year_built') or ''} / {item.get('acreage') if item.get('acreage') is not None else ''}",
+                f"   Total Value/Net Taxable: {(item.get('assessment_values') or {}).get('total_value', '')} / {(item.get('assessment_values') or {}).get('net_taxable', '')}",
                 f"   OBJECTID: {item.get('object_id') or ''}",
                 "",
             ]
@@ -761,7 +811,7 @@ async def _arcgis_public_parcel_lookup_result(
             "answer": "Provide an address, UPC, parcel ID, or owner name with at least 3 characters.",
             "task_id": "",
             "project_id": "",
-            "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
             "results": [],
         }
 
@@ -777,7 +827,7 @@ async def _arcgis_public_parcel_lookup_result(
             "answer": "Could not build an ArcGIS query from the supplied search text.",
             "task_id": "",
             "project_id": "",
-            "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
             "results": [],
         }
 
@@ -829,7 +879,7 @@ async def _arcgis_public_parcel_lookup_result(
                 ).strip(),
                 "task_id": "",
                 "project_id": "",
-                "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+                "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
                 "layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
                 "query_mode": query_mode,
                 "where": where_clause,
@@ -843,7 +893,7 @@ async def _arcgis_public_parcel_lookup_result(
             "answer": f"ArcGIS REST lookup failed or returned an error: {_safe_json_dumps(last_error, 1200)}",
             "task_id": "",
             "project_id": "",
-            "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
             "results": [],
         }
 
@@ -852,7 +902,7 @@ async def _arcgis_public_parcel_lookup_result(
         "answer": "No matching public ArcGIS parcel records were found.",
         "task_id": "",
         "project_id": "",
-        "source": "Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer",
+        "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
         "query_mode": candidates[-1][0] if candidates else "none",
         "where": candidates[-1][1] if candidates else "",
         "results": [],
@@ -905,7 +955,7 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
     status = str(result.get("status") or "")
     lines = [
         "PUBLIC ARCGIS PARCEL CONTEXT:",
-        "- Source: Bernalillo County Assessor Parcels public ArcGIS FeatureServer layer.",
+        "- Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
         "- Use: Subject parcel/GIS context only; verify final assessment details in iasWorld.",
         "- Do not treat GIS attributes as verified sale prices, exemption status, tax status, or a certified record.",
         f"- Search used: {search_text}",
@@ -926,9 +976,15 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
                     f"- Owner: {item.get('owner') or ''}",
                     f"- Owner address: {item.get('owner_address') or ''}",
                     f"- Legal description: {item.get('legal_description') or ''}",
+                    f"- Roll type: {item.get('roll_type') or ''}",
                     f"- Valuation class: {item.get('valuation_class') or ''}",
                     f"- Property class: {item.get('property_class') or ''}",
+                    f"- Land use: {item.get('land_use_code') or ''} {item.get('land_use_description') or ''}",
+                    f"- Style: {item.get('style') or ''}",
+                    f"- Year built: {item.get('year_built') or ''}",
                     f"- Acreage: {item.get('acreage') if item.get('acreage') is not None else ''}",
+                    f"- Total value: {(item.get('assessment_values') or {}).get('total_value', '')}",
+                    f"- Net taxable: {(item.get('assessment_values') or {}).get('net_taxable', '')}",
                     f"- OBJECTID: {item.get('object_id') or ''}",
                 ]
             )
@@ -939,6 +995,8 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
                     f"  {idx}. {item.get('situs_address') or 'Unknown situs'} | "
                     f"UPC {item.get('upc') or ''} | "
                     f"Class {item.get('valuation_class') or ''}/{item.get('property_class') or ''} | "
+                    f"LUC {item.get('land_use_code') or ''} | "
+                    f"Built {item.get('year_built') or ''} | "
                     f"Acreage {item.get('acreage') if item.get('acreage') is not None else ''}"
                 )
         where = result.get("where")
@@ -958,7 +1016,8 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
             "",
             "GIS + HOMEHARVEST INSTRUCTIONS:",
             "- Use the GIS parcel as the subject anchor when a single match is present.",
-            "- For HomeHarvest comps, search around the GIS situs address and prefer residential results consistent with property class, valuation class, acreage, and location when available.",
+            "- For HomeHarvest comps, search around the GIS situs address and prefer residential results consistent with property class, valuation class, land use, year built, style, acreage, and location when available.",
+            "- Never use GIS assessment values, taxable values, or exemptions as sale prices or comp prices.",
             "- Return the GIS subject context first, then the unofficial HomeHarvest/public-aggregator results.",
             "- Clearly label HomeHarvest results as unofficial public-aggregator candidates, not verified sales or final appraisal comps.",
         ]
