@@ -871,7 +871,8 @@ def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
     lines = [
         answer,
         "Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
-        "Limit: Public GIS parcel context only. Verify final assessment details in iasWorld.",
+        "Limit: Public GIS parcel context only. Verify final assessment details, value fields, exemption amount fields, ownership, and tax status in iasWorld.",
+        "Note: Value, taxable, and exemption amount fields are public GIS attributes only; they are not verified sale prices, final tax amounts, exemption approvals, or legal determinations.",
         "",
     ]
 
@@ -893,14 +894,50 @@ def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
                 f"   Land Use: {item.get('land_use_code') or ''} {item.get('land_use_description') or ''}",
                 f"   Class/Style: {item.get('class_description') or ''} / {item.get('style') or ''}",
                 f"   Built/Acres: {item.get('year_built') or ''} / {_fmt_arcgis_number(item.get('acreage'))}",
-                f"   Values: Land {_fmt_arcgis_money(values.get('land_value'))}; Improvements {_fmt_arcgis_money(values.get('improvement_value'))}; Total {_fmt_arcgis_money(values.get('total_value'))}; Net Taxable {_fmt_arcgis_money(values.get('net_taxable'))}",
-                f"   Exemptions: HOH {_fmt_arcgis_money(exemptions.get('head_of_household'))}; Veteran {_fmt_arcgis_money(exemptions.get('veteran'))}; Other {_fmt_arcgis_money(exemptions.get('other'))}; Total {_fmt_arcgis_money(exemptions.get('total'))}",
+            ]
+        )
+
+        value_rows = [
+            ("Land Value", values.get("land_value")),
+            ("Agricultural Value", values.get("ag_value")),
+            ("Improvement Value", values.get("improvement_value")),
+            ("Total Value", values.get("total_value")),
+            ("Land Taxable", values.get("land_taxable")),
+            ("Improvement Taxable", values.get("improvement_taxable")),
+            ("Total Taxable", values.get("total_taxable")),
+            ("Net Taxable", values.get("net_taxable")),
+        ]
+        value_rows = [(label, value) for label, value in value_rows if value is not None and value != ""]
+        if value_rows:
+            lines.append("   Public GIS Value Fields:")
+            for label, value in value_rows:
+                lines.append(f"      {label}: {_fmt_arcgis_money(value)}")
+
+        exemption_rows = [
+            ("Head of Household Amount", exemptions.get("head_of_household")),
+            ("Veteran Amount", exemptions.get("veteran")),
+            ("Other Amount", exemptions.get("other")),
+            ("Total Exemption Amount", exemptions.get("total")),
+        ]
+        exemption_rows = [(label, value) for label, value in exemption_rows if value is not None and value != ""]
+        if exemption_rows:
+            lines.append("   Public GIS Exemption Amount Fields:")
+            for label, value in exemption_rows:
+                lines.append(f"      {label}: {_fmt_arcgis_money(value)}")
+
+        if value_rows or exemption_rows:
+            lines.append("   Verification Note: Confirm value fields, exemption status/amounts, calculations, and taxability in iasWorld before relying on them.")
+
+        lines.extend(
+            [
                 f"   X/Y: {_fmt_arcgis_number(coords.get('x'))} / {_fmt_arcgis_number(coords.get('y'))}",
                 f"   OBJECTID: {item.get('object_id') or ''}",
                 "",
             ]
         )
+
     return "\n".join(lines).strip()
+
 
 async def _arcgis_public_parcel_lookup_result(
     search_text: str,
@@ -1061,7 +1098,7 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
         "PUBLIC ARCGIS PARCEL CONTEXT:",
         "- Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
         "- Use: Subject parcel/GIS context only; verify final assessment details in iasWorld.",
-        "- Do not treat GIS attributes as verified sale prices, exemption status, tax status, or a certified record.",
+        "- Do not treat GIS attributes as verified sale prices, exemption approvals/status, tax status, or a certified record.",
         f"- Search used: {search_text}",
         f"- GIS lookup status: {status or 'unknown'}",
     ]
@@ -1100,7 +1137,7 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
                     f"- Total value: {values.get('total_value', '')}",
                     f"- Total taxable: {values.get('total_taxable', '')}",
                     f"- Net taxable: {values.get('net_taxable', '')}",
-                    f"- Exemptions shown: HOH {exemptions.get('head_of_household', '')}; Veteran {exemptions.get('veteran', '')}; Other {exemptions.get('other', '')}; Total {exemptions.get('total', '')}",
+                    f"- Public GIS exemption amount fields shown: HOH {exemptions.get('head_of_household', '')}; Veteran {exemptions.get('veteran', '')}; Other {exemptions.get('other', '')}; Total {exemptions.get('total', '')}",
                     f"- Coordinates: X {coords.get('x', '')}; Y {coords.get('y', '')}",
                     f"- OBJECTID: {item.get('object_id') or ''}",
                 ]
@@ -1134,7 +1171,7 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
             "GIS + HOMEHARVEST INSTRUCTIONS:",
             "- Use the GIS parcel as the subject anchor when a single match is present.",
             "- For HomeHarvest comps, search around the GIS situs address and prefer residential results consistent with property class, valuation class, land use, year built, style, acreage, tax district, and location when available.",
-            "- Never use GIS assessment values, taxable values, exemption amounts, AVMs, Zestimates, estimates, or list prices as sale prices or comp prices.",
+            "- Never use GIS assessment values, taxable values, exemption amount fields, AVMs, Zestimates, estimates, or list prices as sale prices, comp prices, exemption approvals, or tax/legal determinations.",
             "- Return the GIS subject context first, then the unofficial HomeHarvest/public-aggregator results.",
             "- Clearly label HomeHarvest results as unofficial public-aggregator candidates, not verified sales or final appraisal comps.",
             "- Do not mention an interactive map, file manager, generated file, download, attachment, report, or exported view unless the current tool response includes an actual generated_files item or downloadable link.",
@@ -1613,7 +1650,7 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "GIS + HOMEHARVEST RULES:\n"
     "- If a PUBLIC ARCGIS PARCEL CONTEXT block is present, use it as the subject parcel anchor.\n"
     "- Return the GIS subject context first, then HomeHarvest/public-aggregator candidate results.\n"
-    "- Do not treat GIS data as a verified sale, tax status, exemption status, or certified record.\n"
+    "- Do not treat GIS data as a verified sale, tax status, exemption approval/status, or certified record.\n"
     "- Verify final parcel/account details in iasWorld before relying on them.\n"
     "\n"
     "COMP SEARCH QUALITY RULES:\n"
