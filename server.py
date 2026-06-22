@@ -797,7 +797,16 @@ async def agent_call_route(request):
 
     project_id, tool_name, action_id, poll_seconds = agent_map[agent]
     try:
-        raw_result = await _call_customgpt_task(project_id, prompt_text, tool_name, action_id=action_id, poll_seconds=poll_seconds)
+        if tool_name == "Assessment_Context_Expert":
+            raw_result = await _call_customgpt_task(
+                project_id,
+                prompt_text,
+                tool_name,
+                action_id=action_id,
+                poll_seconds=poll_seconds,
+            )
+        else:
+            raw_result = await _call_customgpt_conversation(project_id, prompt_text, tool_name)
         return JSONResponse(_normalize_aces_result(raw_result, project_id=project_id))
     except Exception as exc:
         _log("agent_call_route exception", agent=agent, error=str(exc))
@@ -1141,6 +1150,129 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
         return answer
 
 
+
+def _extract_session_id_from_conversation_response(data: Any) -> str:
+    """Extract a CustomGPT conversation/session id from common response envelopes."""
+    candidates: List[Any] = []
+    if isinstance(data, dict):
+        candidates.append(data)
+        nested = data.get("data")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        for key in ("session_id", "sessionId", "session", "id", "uuid"):
+            value = item.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return ""
+
+
+async def _call_customgpt_conversation(
+    project_id: str,
+    prompt_text: str,
+    tool_name: str,
+    response_source: str = "openai_content",
+    agent_capability: Optional[str] = None,
+) -> str:
+    """
+    Use the normal CustomGPT conversation API for non-Plan & Act agents.
+
+    The /tasks endpoint creates Plan & Act tasks and requires use_planner_mode.
+    Community_Educator, Clear_Expectations, and Compliance_Expert should use
+    conversations unless those projects are explicitly converted to Plan & Act.
+    """
+    config_error = _require_config(project_id, tool_name)
+    if config_error:
+        return config_error
+
+    prompt_text = str(prompt_text or "").strip()
+    if not prompt_text:
+        return f"{tool_name} received an empty promptText."
+
+    headers = {
+        "Authorization": f"Bearer {CUSTOMGPT_API_TOKEN}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    conversation_name = f"ACES|{tool_name}|{int(time.time())}|{_stable_hash(prompt_text)}"
+    timeout = httpx.Timeout(connect=15, read=max(35, DEFAULT_POLL_SECONDS), write=35, pool=15)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        create = await client.post(
+            f"{CUSTOMGPT_BASE}/projects/{project_id}/conversations",
+            headers=headers,
+            json={"name": conversation_name[:255]},
+        )
+        create_data = await _read_json_or_text(create)
+        _log(
+            "CustomGPT conversation create response",
+            tool=tool_name,
+            project=project_id,
+            http_status=create.status_code,
+            response_preview=_safe_json_dumps(create_data, 1200),
+        )
+
+        if create.status_code >= 400:
+            return (
+                f"{tool_name} conversation create failed.\n"
+                f"HTTP status: {create.status_code}\n"
+                f"Response: {_safe_json_dumps(create_data)}"
+            )
+
+        session_id = _extract_session_id_from_conversation_response(create_data)
+        if not session_id:
+            return (
+                f"{tool_name} conversation create did not return a session id.\n"
+                f"Response: {_safe_json_dumps(create_data)}"
+            )
+
+        payload: Dict[str, Any] = {
+            "prompt": prompt_text,
+            "response_source": response_source,
+        }
+        if agent_capability:
+            payload["agent_capability"] = agent_capability
+
+        message = await client.post(
+            f"{CUSTOMGPT_BASE}/projects/{project_id}/conversations/{session_id}/messages",
+            headers=headers,
+            json=payload,
+        )
+        message_data = await _read_json_or_text(message)
+        _log(
+            "CustomGPT conversation message response",
+            tool=tool_name,
+            project=project_id,
+            session_id=session_id,
+            http_status=message.status_code,
+            response_preview=_safe_json_dumps(message_data, 1200),
+        )
+
+        if message.status_code >= 400:
+            return (
+                f"{tool_name} conversation message failed.\n"
+                f"Project ID: {project_id}\n"
+                f"Session ID: {session_id}\n"
+                f"HTTP status: {message.status_code}\n"
+                f"Response: {_safe_json_dumps(message_data)}"
+            )
+
+        answer = _extract_answer_from_message(message_data)
+        if not answer:
+            return (
+                f"{tool_name} conversation response was empty.\n"
+                f"Project ID: {project_id}\n"
+                f"Session ID: {session_id}\n"
+                f"Response: {_safe_json_dumps(message_data)}"
+            )
+
+        return answer
+
+
 def _is_homeharvest_lookup(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
     return tool_name == "Assessment_Context_Expert" and bool(action_id or _should_enable_homeharvest(prompt_text))
 
@@ -1372,7 +1504,7 @@ async def Community_Educator(promptText: str) -> str:
     protests, forms, deadlines, outreach, value freeze, and owner-facing explanations.
     Takes exactly one parameter: promptText.
     """
-    return await _call_customgpt_task(COMMUNITY_PROJECT_ID, promptText, "Community_Educator", poll_seconds=DEFAULT_POLL_SECONDS)
+    return await _call_customgpt_conversation(COMMUNITY_PROJECT_ID, promptText, "Community_Educator")
 
 
 @mcp.tool
@@ -1401,7 +1533,7 @@ async def Clear_Expectations(promptText: str) -> str:
     Use for staff/HR/training, roles, onboarding, IAAO/USPAP, internal policy,
     expectations, benefits, and development questions. Takes exactly one parameter.
     """
-    return await _call_customgpt_task(CLEAR_PROJECT_ID, promptText, "Clear_Expectations", poll_seconds=DEFAULT_POLL_SECONDS)
+    return await _call_customgpt_conversation(CLEAR_PROJECT_ID, promptText, "Clear_Expectations")
 
 
 @mcp.tool
@@ -1411,7 +1543,7 @@ async def Compliance_Expert(promptText: str) -> str:
     statutory interpretation, protest standards, exemption basis, valuation authority,
     and legal risk. Takes exactly one parameter: promptText.
     """
-    return await _call_customgpt_task(COMPLIANCE_PROJECT_ID, promptText, "Compliance_Expert", poll_seconds=DEFAULT_POLL_SECONDS)
+    return await _call_customgpt_conversation(COMPLIANCE_PROJECT_ID, promptText, "Compliance_Expert")
 
 
 @mcp.tool
