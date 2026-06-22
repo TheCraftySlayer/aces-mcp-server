@@ -529,16 +529,26 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
         return text
 
     action_rule = (
-        "\n\nHOMEHARVEST ACTION RULE:\n"
-        "- Use the enabled HomeHarvest custom action when the request is an address, nearby sale, or comp lookup.\n"
-        "- Do not answer from memory, previous runs, cached examples, or stale conversation context. Run the action for this request.\n"
-        "- Prefer operation homeharvestSearchProperties.\n"
-        "- Use POST /properties/search.\n"
-        "- For sold/comps requests, use sold/listing_type=sold filters when supported and honor date range instructions.\n"
-        "- Return staff-readable numbered cards, not raw JSON.\n"
-        "- If no exact match appears, say no exact match was returned and summarize nearby/public aggregator results.\n"
-        "- A no-result response is not a tool failure.\n"
-    )
+    "\n\nHOMEHARVEST ACTION RULE:\n"
+    "- Use the enabled HomeHarvest custom action when the request is an address, nearby sale, or comp lookup.\n"
+    "- Do not answer from memory, previous runs, cached examples, or stale conversation context. Run the action for this request.\n"
+    "- Prefer operation homeharvestSearchProperties.\n"
+    "- Use POST /properties/search.\n"
+    "- Return staff-readable numbered cards, not raw JSON.\n"
+    "- A no-result response is not a tool failure.\n"
+    "\n"
+    "COMP SEARCH QUALITY RULES:\n"
+    "- For comp requests, use listing_type=sold or sold status when supported.\n"
+    "- For 'past 10 years', use date_from=2016-06-22 and date_to=2026-06-22 unless the user gives a different date range.\n"
+    "- Exclude land, lots, mobile homes, manufactured homes, rentals, active listings, pending listings, and rows with missing price, missing date, missing sqft, or missing residential characteristics.\n"
+    "- Do not return exactly 10 unless 10 usable residential candidates are found.\n"
+    "- If fewer than 10 usable residential candidates are found, return only the usable candidates and clearly say how many were found.\n"
+    "- Do not pad the list with land, missing-data rows, atypical low-price rows, or poor matches.\n"
+    "- Prefer similar residential properties by property type, living area, beds, baths, lot size, year built, and proximity.\n"
+    "- Sort by comp similarity first, not newest first.\n"
+    "- Label results as unofficial public-aggregator candidate comps, not verified sales.\n"
+    "- If the source only returns list/public aggregator prices, say they are not verified sold prices.\n"
+)
 
     if "mode:" in text.lower():
         return text + action_rule
