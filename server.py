@@ -4,6 +4,7 @@ import re
 import asyncio
 import hashlib
 import time
+import secrets
 from typing import Optional, Any, Dict, List, Tuple
 
 # FastMCP reads these through settings/env for Streamable HTTP behavior.
@@ -12,7 +13,7 @@ os.environ.setdefault("FASTMCP_JSON_RESPONSE", "true")
 
 import httpx
 from fastmcp import FastMCP
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
 
 mcp = FastMCP(
@@ -65,6 +66,21 @@ CUSTOMGPT_BASE = os.getenv("CUSTOMGPT_BASE", "https://app.customgpt.ai/api/v1").
 # but may reset after redeploy/cold start. Always return Task ID + Project ID for
 # unfinished tasks so Check_CustomGPT_Task can poll CustomGPT directly.
 TASK_CACHE_FILE = os.getenv("TASK_CACHE_FILE", "/tmp/aces_task_cache.json")
+
+# Generated Context Expert / CustomGPT artifact links.
+# Set ACES_PUBLIC_BASE_URL to your Render public URL, for example:
+#   https://aces-mcp-server.onrender.com
+# The server returns staff-safe download links that proxy through Render without
+# exposing the CustomGPT API token to Copilot/Teams users.
+CONTEXT_EXPERT_FILE_LINKS_ENABLED = os.getenv(
+    "ACES_CONTEXT_EXPERT_FILE_LINKS_ENABLED", "true"
+).strip().lower() not in {"0", "false", "no", "off"}
+PUBLIC_BASE_URL = os.getenv(
+    "ACES_PUBLIC_BASE_URL",
+    os.getenv("PUBLIC_BASE_URL", "https://aces-mcp-server.onrender.com"),
+).rstrip("/")
+FILE_LINK_CACHE_FILE = os.getenv("ACES_FILE_LINK_CACHE_FILE", "/tmp/aces_file_link_cache.json")
+FILE_LINK_TTL_SECONDS = int(os.getenv("ACES_FILE_LINK_TTL_SECONDS", "86400"))
 
 # CustomGPT tasks are async. These values keep MCP calls from holding open too long
 # while still allowing quick tasks to finish in one response.
@@ -263,6 +279,44 @@ def _save_task_cache(cache: Dict[str, Any]) -> None:
 
 
 TASK_CACHE: Dict[str, Any] = _load_task_cache()
+
+
+def _load_file_link_cache() -> Dict[str, Any]:
+    try:
+        if os.path.exists(FILE_LINK_CACHE_FILE):
+            with open(FILE_LINK_CACHE_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                # Drop expired links on startup/load.
+                now = time.time()
+                return {
+                    str(key): value
+                    for key, value in loaded.items()
+                    if isinstance(value, dict) and float(value.get("expires_at", 0) or 0) > now
+                }
+    except Exception as exc:
+        print(f"[file-link-cache] load failed: {exc}", flush=True)
+    return {}
+
+
+def _save_file_link_cache(cache: Dict[str, Any]) -> None:
+    try:
+        # Keep the JSON small by pruning expired entries before every save.
+        now = time.time()
+        expired = [
+            key for key, value in cache.items()
+            if not isinstance(value, dict) or float(value.get("expires_at", 0) or 0) <= now
+        ]
+        for key in expired:
+            cache.pop(key, None)
+
+        with open(FILE_LINK_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[file-link-cache] save failed: {exc}", flush=True)
+
+
+FILE_LINK_CACHE: Dict[str, Any] = _load_file_link_cache()
 
 
 def _task_cache_key(project_id: str, tool_name: str, prompt_text: str) -> str:
@@ -1218,7 +1272,7 @@ async def health_check(request):
             "status": "healthy",
             "service": "aces-mcp-server",
             "mcp_endpoint": "/mcp",
-            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup"],
+            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup", "/context-expert-file/{token}"],
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
             "homeharvest_action_id": HOMEHARVEST_ACTION_ID,
             "arcgis_public_parcel_layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
@@ -1236,6 +1290,10 @@ async def health_check(request):
             "fresh_homeharvest_lookups": FRESH_HOMEHARVEST_LOOKUPS,
             "reuse_completed_homeharvest_answers": REUSE_COMPLETED_HOMEHARVEST_ANSWERS,
             "reuse_running_homeharvest_tasks": REUSE_RUNNING_HOMEHARVEST_TASKS,
+            "context_expert_file_links_enabled": CONTEXT_EXPERT_FILE_LINKS_ENABLED,
+            "public_base_url": PUBLIC_BASE_URL,
+            "file_link_ttl_seconds": FILE_LINK_TTL_SECONDS,
+            "file_link_cache_count": len(FILE_LINK_CACHE),
             "tools": [
                 "Community_Educator",
                 "Assessment_Context_Expert",
@@ -1270,6 +1328,80 @@ async def task_cache_clear(request):
     _save_task_cache(TASK_CACHE)
     _log("task cache cleared", count=count)
     return JSONResponse({"cleared": True, "previous_count": count, "count": len(TASK_CACHE)})
+
+
+@mcp.custom_route("/context-expert-file/{token}", methods=["GET"])
+async def context_expert_file_download_route(request):
+    """
+    Public, unguessable download route for Context Expert generated artifacts.
+
+    The token maps to CustomGPT project/task/message/file metadata stored in the
+    local Render cache. Staff see this safe Render link in Copilot/Teams; the
+    CustomGPT API token stays server-side.
+    """
+    token = str(request.path_params.get("token") or "").strip()
+    if not token:
+        return JSONResponse({"status": "failed", "answer": "Missing download token."}, status_code=400)
+
+    meta = FILE_LINK_CACHE.get(token)
+    if not isinstance(meta, dict):
+        return JSONResponse({"status": "failed", "answer": "Download link not found or the server restarted."}, status_code=404)
+
+    if time.time() > float(meta.get("expires_at", 0) or 0):
+        FILE_LINK_CACHE.pop(token, None)
+        _save_file_link_cache(FILE_LINK_CACHE)
+        return JSONResponse({"status": "failed", "answer": "Download link expired. Ask A.C.E.S. to regenerate or rerun the Context Expert task."}, status_code=410)
+
+    project_id = str(meta.get("project_id") or "").strip()
+    task_id = str(meta.get("task_id") or "").strip()
+    message_id = str(meta.get("message_id") or "").strip()
+    file_id = str(meta.get("file_id") or "").strip()
+    file_name = _safe_download_filename(str(meta.get("file_name") or f"context_expert_file_{file_id}"))
+
+    if not all([project_id, task_id, message_id, file_id]):
+        return JSONResponse({"status": "failed", "answer": "Download link metadata is incomplete."}, status_code=500)
+
+    if not CUSTOMGPT_API_TOKEN:
+        return JSONResponse({"status": "failed", "answer": "Server is missing CUSTOMGPT_API_TOKEN."}, status_code=500)
+
+    url = (
+        f"{CUSTOMGPT_BASE}/projects/{project_id}"
+        f"/tasks/{task_id}/messages/{message_id}/files/{file_id}/download"
+    )
+    headers = {"Authorization": f"Bearer {CUSTOMGPT_API_TOKEN}", "Accept": "*/*"}
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=60, write=30, pool=15), follow_redirects=False) as client:
+            response = await client.get(url, headers=headers)
+    except Exception as exc:
+        _log("context expert file download failed", error=str(exc), project_id=project_id, task_id=task_id, file_id=file_id)
+        return JSONResponse({"status": "failed", "answer": f"Could not contact CustomGPT for the generated file: {exc}"}, status_code=502)
+
+    if response.status_code in {301, 302, 303, 307, 308}:
+        location = response.headers.get("location")
+        if location:
+            return RedirectResponse(location)
+        return JSONResponse({"status": "failed", "answer": "CustomGPT returned a redirect without a location."}, status_code=502)
+
+    if response.status_code == 200:
+        content_type = response.headers.get("content-type") or "application/octet-stream"
+        return Response(
+            content=response.content,
+            media_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+        )
+
+    body_preview = response.text[:1200] if response.text else ""
+    _log("context expert file download bad status", http_status=response.status_code, body_preview=body_preview, file_id=file_id)
+    return JSONResponse(
+        {
+            "status": "failed",
+            "answer": "CustomGPT could not return the generated file. It may have expired; rerun the Context Expert task and download immediately.",
+            "http_status": response.status_code,
+            "response_preview": body_preview,
+        },
+        status_code=502 if response.status_code >= 500 else response.status_code,
+    )
 
 
 @mcp.custom_route("/check-task", methods=["GET"])
@@ -1815,6 +1947,189 @@ async def _fetch_customgpt_final_message(
     return answer
 
 
+def _safe_download_filename(value: str) -> str:
+    """Return a safe filename for Content-Disposition."""
+    name = str(value or "context_expert_file").strip()
+    name = name.replace("\\", "_").replace("/", "_").replace('"', "'")
+    name = re.sub(r"[\r\n\x00-\x1f]+", "_", name).strip(" .")
+    return name[:180] or "context_expert_file"
+
+
+def _markdown_link_label(value: str) -> str:
+    label = str(value or "generated file").strip()
+    label = label.replace("[", "\\[").replace("]", "\\]")
+    return label or "generated file"
+
+
+def _extract_file_list_from_payload(payload: Any) -> List[Dict[str, Any]]:
+    """Find file objects in the common CustomGPT files response envelopes."""
+    found: List[Dict[str, Any]] = []
+
+    def visit(value: Any, depth: int = 0) -> None:
+        if depth > 5:
+            return
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    # File objects usually have an id plus a name/type/content_type.
+                    has_file_shape = bool(
+                        item.get("id") or item.get("file_id") or item.get("uuid") or item.get("artifact_id")
+                    ) and bool(
+                        item.get("name") or item.get("file_name") or item.get("filename") or item.get("title") or item.get("type")
+                    )
+                    if has_file_shape:
+                        found.append(item)
+                    else:
+                        visit(item, depth + 1)
+            return
+        if isinstance(value, dict):
+            for key in ("files", "items", "results", "artifacts", "data"):
+                if key in value:
+                    visit(value.get(key), depth + 1)
+
+    visit(payload)
+
+    # De-dupe by best available id.
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for item in found:
+        file_id = _extract_customgpt_file_id(item)
+        key = file_id or json.dumps(item, sort_keys=True, default=str)[:200]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _extract_customgpt_file_id(file_obj: Dict[str, Any]) -> str:
+    for key in ("id", "file_id", "fileId", "uuid", "artifact_id", "artifactId"):
+        value = file_obj.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _extract_customgpt_file_name(file_obj: Dict[str, Any]) -> str:
+    for key in ("name", "file_name", "fileName", "filename", "original_name", "title"):
+        value = file_obj.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    file_id = _extract_customgpt_file_id(file_obj)
+    return f"context_expert_artifact_{file_id}" if file_id else "context_expert_artifact"
+
+
+def _is_generated_customgpt_artifact(file_obj: Dict[str, Any]) -> bool:
+    text_fields = " ".join(
+        str(file_obj.get(key) or "").lower()
+        for key in ("type", "kind", "category", "source", "storage_type", "origin")
+    )
+    if any(word in text_fields for word in ("artifact", "generated", "output")):
+        return True
+    if file_obj.get("is_artifact") is True or file_obj.get("generated") is True or file_obj.get("is_generated") is True:
+        return True
+    if file_obj.get("artifact_id") or file_obj.get("artifactId"):
+        return True
+    return False
+
+
+async def _create_context_expert_artifact_links(
+    client: httpx.AsyncClient,
+    project_id: str,
+    task_id: str,
+    message_id: str,
+    headers: Dict[str, str],
+) -> List[str]:
+    """List CustomGPT generated artifacts and create staff-safe Render download links."""
+    if not CONTEXT_EXPERT_FILE_LINKS_ENABLED:
+        return []
+    if not PUBLIC_BASE_URL:
+        _log("context expert file links skipped - missing PUBLIC_BASE_URL")
+        return []
+    if not message_id:
+        return []
+
+    url = f"{CUSTOMGPT_BASE}/projects/{project_id}/tasks/{task_id}/messages/{message_id}/files"
+    try:
+        response = await client.get(url, headers=headers)
+        payload = await _read_json_or_text(response)
+    except Exception as exc:
+        _log("context expert files list failed", project_id=project_id, task_id=task_id, message_id=message_id, error=str(exc))
+        return []
+
+    if response.status_code >= 400:
+        _log(
+            "context expert files list bad status",
+            project_id=project_id,
+            task_id=task_id,
+            message_id=message_id,
+            http_status=response.status_code,
+            response_preview=_safe_json_dumps(payload, 1200),
+        )
+        return []
+
+    file_objects = _extract_file_list_from_payload(payload)
+    links: List[str] = []
+    now = time.time()
+
+    for file_obj in file_objects:
+        if not _is_generated_customgpt_artifact(file_obj):
+            continue
+
+        file_id = _extract_customgpt_file_id(file_obj)
+        if not file_id:
+            continue
+
+        file_name = _safe_download_filename(_extract_customgpt_file_name(file_obj))
+        token = secrets.token_urlsafe(32)
+        FILE_LINK_CACHE[token] = {
+            "project_id": str(project_id),
+            "task_id": str(task_id),
+            "message_id": str(message_id),
+            "file_id": str(file_id),
+            "file_name": file_name,
+            "created_at": _now_iso(),
+            "expires_at": now + max(300, FILE_LINK_TTL_SECONDS),
+            "customgpt_file_type": file_obj.get("type") or file_obj.get("kind") or "artifact",
+        }
+
+        links.append(f"- [{_markdown_link_label(file_name)}]({PUBLIC_BASE_URL}/context-expert-file/{token})")
+
+    if links:
+        _save_file_link_cache(FILE_LINK_CACHE)
+        _log("context expert artifact links created", project_id=project_id, task_id=task_id, message_id=message_id, count=len(links))
+
+    return links
+
+
+async def _append_context_expert_artifact_links(
+    client: httpx.AsyncClient,
+    answer: str,
+    project_id: str,
+    task_id: str,
+    message_id: Optional[str],
+    headers: Dict[str, str],
+) -> str:
+    """Append markdown download links for generated artifacts, when present."""
+    text = str(answer or "").strip()
+    if not text or not message_id:
+        return text
+    if "context-expert-file/" in text or "Generated files:" in text:
+        return text
+
+    links = await _create_context_expert_artifact_links(
+        client=client,
+        project_id=project_id,
+        task_id=task_id,
+        message_id=str(message_id),
+        headers=headers,
+    )
+    if not links:
+        return text
+
+    return text + "\n\nGenerated files:\n" + "\n".join(links)
+
+
 async def _fetch_task_history_fallback(
     client: httpx.AsyncClient,
     project_id: str,
@@ -1910,7 +2225,8 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
 
         inline_answer = _extract_answer_from_message({"data": data}) or _extract_answer_from_message(data)
         if inline_answer:
-            _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status=latest_status, progress_log=progress_log, answer=inline_answer)
+            inline_answer = await _append_context_expert_artifact_links(client, inline_answer, project_id, task_id, str(message_id) if message_id else None, headers)
+            _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status=latest_status, message_id=str(message_id) if message_id else None, progress_log=progress_log, answer=inline_answer)
             return inline_answer
 
         if not message_id:
@@ -1931,12 +2247,14 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
         if answer.startswith("Final message fetch failed") or answer.startswith("Task completed but the final answer was empty"):
             history_answer = await _fetch_task_history_fallback(client, project_id, task_id, headers)
             if history_answer:
+                history_answer = await _append_context_expert_artifact_links(client, history_answer, project_id, task_id, str(message_id), headers)
                 _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status="history_fallback", message_id=str(message_id), progress_log=progress_log, answer=history_answer)
                 return history_answer
 
             _update_task_cache_by_task_id(project_id, task_id, "final_fetch_or_empty_failed", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, error=answer)
             return answer
 
+        answer = await _append_context_expert_artifact_links(client, answer, project_id, task_id, str(message_id), headers)
         _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, answer=answer)
         return answer
 
@@ -2259,6 +2577,7 @@ async def _call_customgpt_task(
 
         inline_answer = _extract_answer_from_message({"data": completed_data}) or _extract_answer_from_message(completed_data)
         if inline_answer:
+            inline_answer = await _append_context_expert_artifact_links(client, inline_answer, project_id, task_id, str(message_id) if message_id else None, headers)
             _remember_task(project_id, tool_name, prompt_text, task_id, "answered", latest_status=latest_status, message_id=str(message_id) if message_id else None, progress_log=progress_log, answer=inline_answer)
             return inline_answer
 
@@ -2281,12 +2600,14 @@ async def _call_customgpt_task(
         if answer.startswith("Final message fetch failed") or answer.startswith("Task completed but the final answer was empty"):
             history_answer = await _fetch_task_history_fallback(client, project_id, task_id, headers)
             if history_answer:
+                history_answer = await _append_context_expert_artifact_links(client, history_answer, project_id, task_id, str(message_id), headers)
                 _remember_task(project_id, tool_name, prompt_text, task_id, "answered", latest_status="history_fallback", message_id=str(message_id), progress_log=progress_log, answer=history_answer)
                 return history_answer
 
             _remember_task(project_id, tool_name, prompt_text, task_id, "final_fetch_or_empty_failed", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, error=answer)
             return f"{tool_name} final retrieval failed.\nTask ID: {task_id}\nProject ID: {project_id}\nCache key: {cache_key}\n{answer}"
 
+        answer = await _append_context_expert_artifact_links(client, answer, project_id, task_id, str(message_id), headers)
         _remember_task(project_id, tool_name, prompt_text, task_id, "answered", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, answer=answer)
         return answer
 
