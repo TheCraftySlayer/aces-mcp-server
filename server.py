@@ -705,6 +705,16 @@ def _require_rest_auth(request) -> Optional[JSONResponse]:
 # returned to Copilot, and geometry is disabled by default.
 ARCGIS_PUBLIC_PARCEL_OUT_FIELDS = "*"
 
+
+def _arcgis_request_headers() -> Dict[str, str]:
+    """Headers that keep BernCo ArcGIS/Cloudflare from treating server-side REST calls as suspicious."""
+    return {
+        "User-Agent": "ACES-MCP-Server/1.0 (+Bernalillo County Assessor internal staff tool)",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": f"{BERNCO_EXPERIENCE_APP_URL}/",
+    }
+
+
 _ARCGIS_STREET_SUFFIX_REPLACEMENTS = {
     "COURT": "CT",
     "DRIVE": "DR",
@@ -1185,7 +1195,7 @@ async def _arcgis_public_parcel_lookup_result(
                 params["outSR"] = "4326"
 
             try:
-                response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params)
+                response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers())
                 data = await _read_json_or_text(response)
             except Exception as exc:
                 last_error = str(exc)
@@ -1274,13 +1284,13 @@ def _arcgis_sql_equals(field: str, value: Any) -> str:
 
 def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, str]]:
     """
-    Build progressively broader where clauses for ArcGIS-only parcel peers.
-    These clauses intentionally avoid square footage/sale data because the public
-    ArcGIS layer does not provide those fields.
+    Build progressively broader, Cloudflare-safe where clauses for ArcGIS-only
+    parcel peers. Do NOT include SQL exclusion logic such as UPC <> subject,
+    OBJECTID <>, IS NULL, or OR here. Those are filtered client-side after the
+    ArcGIS response. Keeping these as simple equality-only clauses avoids WAF
+    blocks while still limiting the candidate pool.
     """
     tax_year = subject.get("tax_year") or subject.get("int_tax_year")
-    upc = subject.get("upc") or subject.get("txt_upc")
-    object_id = subject.get("object_id") or subject.get("oid")
     roll_type = subject.get("roll_type")
     prop_class = subject.get("property_class")
     val_class = subject.get("valuation_class")
@@ -1291,14 +1301,6 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
     base: List[str] = []
     if tax_year:
         base.append(_arcgis_sql_equals("TAXYR", tax_year))
-    if upc:
-        safe_upc = _clean_arcgis_sql_text(str(upc))
-        base.append(f"(UPC IS NULL OR UPC <> '{safe_upc}')")
-    if object_id:
-        try:
-            base.append(f"OBJECTID <> {int(float(object_id))}")
-        except Exception:
-            pass
 
     def build(extra: List[str]) -> str:
         clauses = base + [item for item in extra if item]
@@ -1306,7 +1308,6 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
 
     stages: List[Tuple[str, str]] = []
 
-    # Tightest: same public GIS class/use/style/tax district when available.
     tight: List[str] = []
     if roll_type:
         tight.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
@@ -1344,10 +1345,8 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
     broad: List[str] = []
     if roll_type:
         broad.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
-    elif prop_class:
-        broad.append(_arcgis_sql_equals("PROPCLASS", prop_class))
     if broad:
-        stages.append(("same_roll_or_class", build(broad)))
+        stages.append(("same_roll_type", build(broad)))
 
     stages.append(("nearby_public_parcels", build([])))
 
@@ -1358,7 +1357,6 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
             seen.add(where)
             unique.append((name, where))
     return unique
-
 
 def _arcgis_candidate_peer_score(subject: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
     """Score public GIS candidate peers using only fields available in ArcGIS."""
@@ -1528,7 +1526,7 @@ async def _arcgis_public_candidate_peers_result(
                     "units": "esriSRUnit_Foot",
                 }
                 try:
-                    response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params)
+                    response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers())
                     data = await _read_json_or_text(response)
                 except Exception as exc:
                     last_error = str(exc)
