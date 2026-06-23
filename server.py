@@ -86,6 +86,7 @@ FILE_LINK_TTL_SECONDS = int(os.getenv("ACES_FILE_LINK_TTL_SECONDS", "86400"))
 # while still allowing quick tasks to finish in one response.
 DEFAULT_POLL_SECONDS = int(os.getenv("ACES_DEFAULT_POLL_SECONDS", "60"))
 HOMEHARVEST_POLL_SECONDS = int(os.getenv("ACES_HOMEHARVEST_POLL_SECONDS", "25"))
+REPORT_GENERATION_POLL_SECONDS = int(os.getenv("ACES_REPORT_GENERATION_POLL_SECONDS", "25"))
 POLL_INTERVAL_SECONDS = float(os.getenv("ACES_POLL_INTERVAL_SECONDS", "3"))
 MAX_CACHED_ANSWER_CHARS = int(os.getenv("ACES_MAX_CACHED_ANSWER_CHARS", "80000"))
 
@@ -226,9 +227,12 @@ def _canonical_prompt_for_cache(tool_name: str, prompt_text: str) -> str:
             for word in ["comp", "comps", "nearby sale", "nearby sales", "sold", "sale", "sales", "market", "similar"]
         )
         wants_listing = any(word in norm for word in ["listing", "listings", "active", "for sale"])
+        wants_report = _request_needs_report_generation(raw)
         wants_lookup = any(word in norm for word in ["look up", "lookup", "property", "address", "homeharvest"])
 
-        if wants_comps:
+        if wants_report:
+            intent = "report_generation"
+        elif wants_comps:
             intent = "comps"
         elif wants_listing:
             intent = "listings"
@@ -1265,6 +1269,145 @@ async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
         )
 
 
+def _format_arcgis_context_for_report_generation(result: Dict[str, Any], search_text: str) -> str:
+    """Create ArcGIS subject context plus report-generation instructions for Context Expert."""
+    status = str(result.get("status") or "")
+    lines = [
+        "MODE: ADDRESS REPORT GENERATION",
+        "",
+        "PUBLIC ARCGIS PARCEL CONTEXT:",
+        "- Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
+        "- Use: Subject parcel/GIS context only; verify final assessment details in iasWorld.",
+        "- Do not treat GIS attributes as verified sale prices, tax status, exemption approvals/status, or a certified record.",
+        f"- Search used: {search_text}",
+        f"- GIS lookup status: {status or 'unknown'}",
+    ]
+
+    if status == "completed":
+        results = result.get("results") or []
+        lines.append(f"- Match count: {len(results)}")
+        if len(results) == 1:
+            item = results[0]
+            values = item.get("assessment_values") or {}
+            exemptions = item.get("exemptions") or {}
+            coords = item.get("coordinates") or {}
+            lines.extend(
+                [
+                    "- Subject anchor: exact/single public GIS match.",
+                    f"- UPC: {item.get('upc') or ''}",
+                    f"- PIN: {item.get('pin') or ''}",
+                    f"- PID/TID: {item.get('pid') or ''} / {item.get('tid') or ''}",
+                    f"- Tax year: {item.get('tax_year') or ''}",
+                    f"- Situs address: {item.get('situs_address') or ''}",
+                    f"- Owner: {item.get('owner') or ''}",
+                    f"- Owner address: {item.get('owner_address') or ''}",
+                    f"- Tax district: {item.get('tax_district') or ''}",
+                    f"- Legal description: {item.get('legal_description') or ''}",
+                    f"- Document number: {item.get('document_number') or ''}",
+                    f"- Roll type: {item.get('roll_type') or ''}",
+                    f"- Valuation class: {item.get('valuation_class') or ''}",
+                    f"- Property class: {item.get('property_class') or ''}",
+                    f"- Land use: {item.get('land_use_code') or ''} {item.get('land_use_description') or ''}",
+                    f"- Class description: {item.get('class_description') or ''}",
+                    f"- Style: {item.get('style') or ''}",
+                    f"- Year built: {item.get('year_built') or ''}",
+                    f"- Acreage: {item.get('acreage') if item.get('acreage') is not None else ''}",
+                    f"- Land value: {values.get('land_value', '')}",
+                    f"- Improvement value: {values.get('improvement_value', '')}",
+                    f"- Total value: {values.get('total_value', '')}",
+                    f"- Total taxable: {values.get('total_taxable', '')}",
+                    f"- Net taxable: {values.get('net_taxable', '')}",
+                    f"- Public GIS exemption amount fields shown: HOH {exemptions.get('head_of_household', '')}; Veteran {exemptions.get('veteran', '')}; Other {exemptions.get('other', '')}; Total {exemptions.get('total', '')}",
+                    f"- Coordinates: X {coords.get('x', '')}; Y {coords.get('y', '')}",
+                    f"- OBJECTID: {item.get('object_id') or ''}",
+                ]
+            )
+        else:
+            lines.append("- Subject anchor: multiple public GIS candidates; do not assume one is correct.")
+            for idx, item in enumerate(results[:5], start=1):
+                lines.append(
+                    f"  {idx}. {item.get('situs_address') or 'Unknown situs'} | "
+                    f"UPC {item.get('upc') or ''} | PIN {item.get('pin') or ''} | "
+                    f"Class {item.get('valuation_class') or ''}/{item.get('property_class') or ''} | "
+                    f"LUC {item.get('land_use_code') or ''} | "
+                    f"Built {item.get('year_built') or ''} | "
+                    f"Acreage {item.get('acreage') if item.get('acreage') is not None else ''}"
+                )
+    else:
+        lines.extend(
+            [
+                f"- ArcGIS answer: {result.get('answer') or 'No usable GIS context.'}",
+                "- Continue with Context Expert if the staff request requires report/file generation, but disclose that GIS context was not found.",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "REPORT GENERATION INSTRUCTIONS:",
+            "- Preserve the staff request exactly and create a staff-readable property/report response from the available context.",
+            "- If the Context Expert can create a downloadable artifact/file for this request, generate it.",
+            "- Do not invent missing official fields, values, sales, comps, ownership conclusions, exemption approvals, tax status, or legal/appraisal conclusions.",
+            "- Label ArcGIS as public GIS context only and require iasWorld verification before final use.",
+            "- If no downloadable artifact is created, return the text report and do not claim that a file was generated.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+async def _enrich_report_generation_prompt_with_arcgis(prompt_text: str) -> str:
+    """Prepend public ArcGIS parcel context for address/parcel report-generation tasks."""
+    text = str(prompt_text or "").strip()
+    if "REPORT GENERATION INSTRUCTIONS:" in text and "PUBLIC ARCGIS PARCEL CONTEXT:" in text:
+        return text
+
+    search_text = _extract_arcgis_search_text_from_prompt(text)
+    if not search_text:
+        return (
+            "MODE: REPORT GENERATION\n\n"
+            f"STAFF REQUEST:\n{text}\n\n"
+            "REPORT GENERATION INSTRUCTIONS:\n"
+            "- Create the requested staff-readable report/file if supported by Context Expert.\n"
+            "- No ArcGIS pre-check was run because no address or UPC could be extracted.\n"
+            "- Do not invent missing official fields, values, sales, comps, or legal/appraisal conclusions."
+        )
+
+    try:
+        gis_result = await _arcgis_public_parcel_lookup_result(search_text=search_text, max_results=5, return_geometry=False)
+        context_block = _format_arcgis_context_for_report_generation(gis_result, search_text)
+        _log(
+            "ArcGIS pre-check for report generation",
+            status=gis_result.get("status"),
+            count=gis_result.get("count"),
+            query_mode=gis_result.get("query_mode"),
+        )
+        return f"{context_block}\n\nSTAFF REQUEST:\n{text}"
+    except Exception as exc:
+        _log("ArcGIS report-generation pre-check failed", error=str(exc))
+        return (
+            "MODE: REPORT GENERATION\n\n"
+            f"STAFF REQUEST:\n{text}\n\n"
+            "PUBLIC ARCGIS PARCEL CONTEXT:\n"
+            f"- ArcGIS pre-check failed before Context Expert submission: {exc}\n\n"
+            "REPORT GENERATION INSTRUCTIONS:\n"
+            "- Continue with Context Expert report/file generation if supported.\n"
+            "- Disclose that GIS pre-check failed.\n"
+            "- Do not invent missing official fields, values, sales, comps, or legal/appraisal conclusions."
+        )
+
+
+@mcp.custom_route("/", methods=["GET", "HEAD"])
+async def root_route(request):
+    return JSONResponse(
+        {
+            "status": "ok",
+            "service": "aces-mcp-server",
+            "health": "/health",
+            "mcp": "/mcp",
+        }
+    )
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
     return JSONResponse(
@@ -1284,6 +1427,7 @@ async def health_check(request):
             "task_cache_debug_enabled": bool(ACES_ADMIN_TOKEN),
             "default_poll_seconds": DEFAULT_POLL_SECONDS,
             "homeharvest_poll_seconds": HOMEHARVEST_POLL_SECONDS,
+            "report_generation_poll_seconds": REPORT_GENERATION_POLL_SECONDS,
             "duplicate_prompt_reuse": True,
             "semantic_duplicate_prompt_reuse": True,
             "cached_final_answers": True,
@@ -1486,9 +1630,9 @@ async def start_lookup_route(request):
     REST wrapper for Power Automate/Copilot Studio.
 
     Plain address/parcel lookups return a fast ArcGIS-only response.
-    Requests for comps, sales, listings, market support, HomeHarvest, or public
-    aggregator data run ArcGIS first and then submit the enriched prompt to
-    Assessment_Context_Expert/HomeHarvest.
+    Requests for comps, sales, listings, market support, HomeHarvest, public
+    aggregator data, reports, exports, PDFs, files, or downloads submit the
+    full prompt to Assessment_Context_Expert, with ArcGIS context when available.
 
     Returns:
       {"status":"completed|still_processing|failed|task_not_found",
@@ -1514,9 +1658,27 @@ async def start_lookup_route(request):
         )
 
     try:
+        # Report/file/PDF/export generation must go to Context Expert. Do this
+        # before the ArcGIS-only fast path so "generate a report on [address]"
+        # does not get reduced to a plain parcel lookup.
+        if _request_needs_report_generation(prompt_text):
+            report_prompt = await _enrich_report_generation_prompt_with_arcgis(prompt_text)
+            action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(prompt_text) else None
+            poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else REPORT_GENERATION_POLL_SECONDS
+            raw_result = await _call_customgpt_task(
+                ASSESSMENT_PROJECT_ID,
+                report_prompt,
+                "Assessment_Context_Expert",
+                action_id=action_id,
+                poll_seconds=poll_seconds,
+            )
+            normalized = _normalize_aces_result(raw_result, project_id=ASSESSMENT_PROJECT_ID)
+            return JSONResponse(normalized)
+
         # Fast path: plain address/parcel lookup should not spawn a long
         # HomeHarvest/CustomGPT task or return comps unless staff asked for comps,
-        # sales, listings, market support, HomeHarvest, or public aggregator data.
+        # sales, listings, market support, HomeHarvest, public aggregator data,
+        # or report/file generation.
         if _should_use_arcgis_only_lookup(prompt_text):
             search_text = _extract_arcgis_search_text_from_prompt(prompt_text) or prompt_text
             gis_result = await _arcgis_public_parcel_lookup_result(
@@ -1744,6 +1906,61 @@ def _request_needs_homeharvest(prompt_text: str) -> bool:
     return explicit_mode or any(word in text for word in comp_or_listing_words)
 
 
+
+
+def _request_needs_report_generation(prompt_text: str) -> bool:
+    """
+    True when staff asks for a generated report/file/PDF/export/download. These
+    requests must go to Context Expert, not the ArcGIS-only fast path.
+    """
+    text = (prompt_text or "").lower()
+
+    explicit_modes = [
+        "mode: address report generation",
+        "mode: report generation",
+        "report generation",
+        "file generation",
+    ]
+    if any(mode in text for mode in explicit_modes):
+        return True
+
+    report_or_file_phrases = [
+        "generate a report",
+        "generate report",
+        "create a report",
+        "create report",
+        "make a report",
+        "make report",
+        "prepare a report",
+        "write a report",
+        "report on",
+        "property report",
+        "parcel report",
+        "owner report",
+        "staff report",
+        "generate a file",
+        "generate file",
+        "create a file",
+        "create file",
+        "downloadable file",
+        "generated file",
+        "download link",
+        "download links",
+        "download the report",
+        "download report",
+        "export report",
+        "export a report",
+        "export to pdf",
+        "create pdf",
+        "generate pdf",
+        "pdf report",
+        "attachment",
+        "artifact",
+    ]
+
+    return any(phrase in text for phrase in report_or_file_phrases)
+
+
 def _looks_like_arcgis_lookup(prompt_text: str) -> bool:
     """Detect a plain address/UPC/property lookup that can be answered by ArcGIS.
 
@@ -1777,7 +1994,11 @@ def _looks_like_arcgis_lookup(prompt_text: str) -> bool:
 
 def _should_use_arcgis_only_lookup(prompt_text: str) -> bool:
     """Use ArcGIS-only fast path for plain parcel/address lookup."""
-    return _looks_like_arcgis_lookup(prompt_text) and not _request_needs_homeharvest(prompt_text)
+    return (
+        _looks_like_arcgis_lookup(prompt_text)
+        and not _request_needs_homeharvest(prompt_text)
+        and not _request_needs_report_generation(prompt_text)
+    )
 
 
 def _should_enable_homeharvest(prompt_text: str) -> bool:
@@ -1834,6 +2055,8 @@ def _detect_assessment_status_message(prompt_text: str) -> str:
         return "Address/HomeHarvest task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
     if "mode: record + homeharvest comp support" in text:
         return "Record/HomeHarvest comp-support task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
+    if "mode: address report generation" in text or "mode: report generation" in text or _request_needs_report_generation(prompt_text):
+        return "Report/file generation task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
     return "Task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
 
 
@@ -2386,6 +2609,14 @@ def _is_homeharvest_lookup(tool_name: str, prompt_text: str, action_id: Optional
     return tool_name == "Assessment_Context_Expert" and bool(action_id or _should_enable_homeharvest(prompt_text))
 
 
+def _is_fresh_assessment_task(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
+    """HomeHarvest and report/file generation should not reuse completed cached answers."""
+    return tool_name == "Assessment_Context_Expert" and (
+        _is_homeharvest_lookup(tool_name, prompt_text, action_id)
+        or _request_needs_report_generation(prompt_text)
+    )
+
+
 def _should_reuse_prompt_cache(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
     """
     Decide whether a direct specialist tool call may reuse a prompt-level cached task.
@@ -2393,7 +2624,7 @@ def _should_reuse_prompt_cache(tool_name: str, prompt_text: str, action_id: Opti
     Important: this controls only the initial tool call. Task IDs can still be
     checked through Check_CustomGPT_Task, and every submitted task is still saved.
     """
-    if not _is_homeharvest_lookup(tool_name, prompt_text, action_id):
+    if not _is_fresh_assessment_task(tool_name, prompt_text, action_id):
         return True
 
     if not FRESH_HOMEHARVEST_LOOKUPS:
@@ -2438,6 +2669,11 @@ async def _call_customgpt_task(
         # prompt is enriched with HomeHarvest instructions and submitted to CustomGPT.
         prompt_text = await _enrich_homeharvest_prompt_with_arcgis(prompt_text)
         prompt_text = _enrich_homeharvest_prompt(prompt_text)
+    elif tool_name == "Assessment_Context_Expert" and _request_needs_report_generation(prompt_text):
+        # Report/file/PDF/export generation should still get GIS context when an
+        # address or UPC is present, but should not force HomeHarvest unless the
+        # staff request also asks for comps/sales/listings/market data.
+        prompt_text = await _enrich_report_generation_prompt_with_arcgis(prompt_text)
 
     _log("specialist tool received prompt", tool=tool_name, project=project_id, action_id=action_id or "", prompt_preview=_safe_json_dumps(prompt_text[:800], 900))
 
@@ -2458,10 +2694,10 @@ async def _call_customgpt_task(
             _log("CACHE HIT - rechecking existing task", tool=tool_name, project=project_id, task_id=existing_task_id)
             return await _check_customgpt_task_result(project_id=project_id, task_id=existing_task_id)
 
-    if existing_task and _is_homeharvest_lookup(tool_name, prompt_text, action_id) and _should_reuse_existing_homeharvest_task(existing_task):
+    if existing_task and _is_fresh_assessment_task(tool_name, prompt_text, action_id) and _should_reuse_existing_homeharvest_task(existing_task):
         existing_task_id = str(existing_task.get("task_id") or "").strip()
         if existing_task_id:
-            _log("REUSING IN-FLIGHT HOMEHARVEST TASK", tool=tool_name, project=project_id, task_id=existing_task_id)
+            _log("REUSING IN-FLIGHT ASSESSMENT TASK", tool=tool_name, project=project_id, task_id=existing_task_id)
             return await _check_customgpt_task_result(project_id=project_id, task_id=existing_task_id)
 
     if existing_task and not should_reuse_prompt_cache:
@@ -2631,8 +2867,9 @@ async def Assessment_Context_Expert(promptText: str) -> str:
     Takes exactly one parameter: promptText.
     """
     action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(promptText) else None
-    poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else DEFAULT_POLL_SECONDS
-    _log("Assessment_Context_Expert invoked", homeharvest_enabled=bool(action_id), action_id=action_id or "", poll_seconds=poll_seconds)
+    needs_report = _request_needs_report_generation(promptText)
+    poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else (REPORT_GENERATION_POLL_SECONDS if needs_report else DEFAULT_POLL_SECONDS)
+    _log("Assessment_Context_Expert invoked", homeharvest_enabled=bool(action_id), report_generation=needs_report, action_id=action_id or "", poll_seconds=poll_seconds)
     return await _call_customgpt_task(
         ASSESSMENT_PROJECT_ID,
         promptText,
