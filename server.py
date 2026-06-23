@@ -1269,11 +1269,20 @@ async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
         )
 
 
-def _format_arcgis_context_for_report_generation(result: Dict[str, Any], search_text: str) -> str:
+def _format_arcgis_context_for_report_generation(
+    result: Dict[str, Any],
+    search_text: str,
+    include_homeharvest: bool = False,
+) -> str:
     """Create ArcGIS subject context plus report-generation instructions for Context Expert."""
     status = str(result.get("status") or "")
+    mode = (
+        "MODE: ADDRESS REPORT + HOMEHARVEST MARKET SUPPORT"
+        if include_homeharvest
+        else "MODE: ADDRESS REPORT GENERATION"
+    )
     lines = [
-        "MODE: ADDRESS REPORT GENERATION",
+        mode,
         "",
         "PUBLIC ARCGIS PARCEL CONTEXT:",
         "- Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
@@ -1346,53 +1355,107 @@ def _format_arcgis_context_for_report_generation(result: Dict[str, Any], search_
             "",
             "REPORT GENERATION INSTRUCTIONS:",
             "- Preserve the staff request exactly and create a staff-readable property/report response from the available context.",
+            "- Include a Public GIS Parcel Context section using the ArcGIS context above.",
             "- If the Context Expert can create a downloadable artifact/file for this request, generate it.",
             "- Do not invent missing official fields, values, sales, comps, ownership conclusions, exemption approvals, tax status, or legal/appraisal conclusions.",
             "- Label ArcGIS as public GIS context only and require iasWorld verification before final use.",
             "- If no downloadable artifact is created, return the text report and do not claim that a file was generated.",
         ]
     )
+
+    if include_homeharvest:
+        lines.extend(
+            [
+                "",
+                "HOMEHARVEST REPORT INSTRUCTIONS:",
+                "- Use the enabled HomeHarvest custom action for unofficial public-aggregator market support.",
+                "- Include a HomeHarvest/Public Aggregator Market Support section in both the text answer and any generated report file.",
+                "- Search around the ArcGIS situs/subject anchor when a single ArcGIS match is present.",
+                "- Prefer residential sales/listings consistent with property class, valuation class, land use, year built, acreage, tax district, and location when available.",
+                "- Label HomeHarvest rows as unofficial public-aggregator data, not verified MLS, iasWorld/CAMA, legal, tax, valuation, exemption, ownership, or sale data.",
+                "- Do not use AVMs, assessed values, taxable values, exemption amounts, estimates, or list/public-aggregator prices as verified sale prices.",
+                "- If HomeHarvest returns no usable rows, include that limitation instead of inventing market data.",
+            ]
+        )
+
     return "\n".join(lines).strip()
 
 
-async def _enrich_report_generation_prompt_with_arcgis(prompt_text: str) -> str:
+async def _enrich_report_generation_prompt_with_arcgis(
+    prompt_text: str,
+    include_homeharvest: bool = False,
+) -> str:
     """Prepend public ArcGIS parcel context for address/parcel report-generation tasks."""
     text = str(prompt_text or "").strip()
     if "REPORT GENERATION INSTRUCTIONS:" in text and "PUBLIC ARCGIS PARCEL CONTEXT:" in text:
+        if include_homeharvest and "HOMEHARVEST REPORT INSTRUCTIONS:" not in text:
+            return text + (
+                "\n\nHOMEHARVEST REPORT INSTRUCTIONS:\n"
+                "- Use the enabled HomeHarvest custom action for unofficial public-aggregator market support.\n"
+                "- Include HomeHarvest/Public Aggregator Market Support in the text answer and any generated report file.\n"
+                "- Label HomeHarvest data as unofficial and not verified MLS, iasWorld/CAMA, legal, tax, valuation, exemption, ownership, or sale data."
+            )
         return text
+
+    mode = (
+        "MODE: ADDRESS REPORT + HOMEHARVEST MARKET SUPPORT"
+        if include_homeharvest
+        else "MODE: REPORT GENERATION"
+    )
 
     search_text = _extract_arcgis_search_text_from_prompt(text)
     if not search_text:
+        extra = ""
+        if include_homeharvest:
+            extra = (
+                "\nHOMEHARVEST REPORT INSTRUCTIONS:\n"
+                "- Use the enabled HomeHarvest custom action for unofficial public-aggregator market support if the request contains enough location context.\n"
+                "- Label HomeHarvest data as unofficial and not verified sales or official assessment data.\n"
+            )
         return (
-            "MODE: REPORT GENERATION\n\n"
+            f"{mode}\n\n"
             f"STAFF REQUEST:\n{text}\n\n"
             "REPORT GENERATION INSTRUCTIONS:\n"
             "- Create the requested staff-readable report/file if supported by Context Expert.\n"
             "- No ArcGIS pre-check was run because no address or UPC could be extracted.\n"
-            "- Do not invent missing official fields, values, sales, comps, or legal/appraisal conclusions."
+            "- Do not invent missing official fields, values, sales, comps, or legal/appraisal conclusions.\n"
+            f"{extra}"
         )
 
     try:
         gis_result = await _arcgis_public_parcel_lookup_result(search_text=search_text, max_results=5, return_geometry=False)
-        context_block = _format_arcgis_context_for_report_generation(gis_result, search_text)
+        context_block = _format_arcgis_context_for_report_generation(
+            gis_result,
+            search_text,
+            include_homeharvest=include_homeharvest,
+        )
         _log(
             "ArcGIS pre-check for report generation",
             status=gis_result.get("status"),
             count=gis_result.get("count"),
             query_mode=gis_result.get("query_mode"),
+            include_homeharvest=include_homeharvest,
         )
         return f"{context_block}\n\nSTAFF REQUEST:\n{text}"
     except Exception as exc:
         _log("ArcGIS report-generation pre-check failed", error=str(exc))
+        extra = ""
+        if include_homeharvest:
+            extra = (
+                "\nHOMEHARVEST REPORT INSTRUCTIONS:\n"
+                "- Use the enabled HomeHarvest custom action for unofficial public-aggregator market support if possible.\n"
+                "- Label HomeHarvest data as unofficial and not verified sales or official assessment data.\n"
+            )
         return (
-            "MODE: REPORT GENERATION\n\n"
+            f"{mode}\n\n"
             f"STAFF REQUEST:\n{text}\n\n"
             "PUBLIC ARCGIS PARCEL CONTEXT:\n"
             f"- ArcGIS pre-check failed before Context Expert submission: {exc}\n\n"
             "REPORT GENERATION INSTRUCTIONS:\n"
             "- Continue with Context Expert report/file generation if supported.\n"
             "- Disclose that GIS pre-check failed.\n"
-            "- Do not invent missing official fields, values, sales, comps, or legal/appraisal conclusions."
+            "- Do not invent missing official fields, values, sales, comps, or legal/appraisal conclusions.\n"
+            f"{extra}"
         )
 
 
@@ -1662,8 +1725,14 @@ async def start_lookup_route(request):
         # before the ArcGIS-only fast path so "generate a report on [address]"
         # does not get reduced to a plain parcel lookup.
         if _request_needs_report_generation(prompt_text):
-            report_prompt = await _enrich_report_generation_prompt_with_arcgis(prompt_text)
-            action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(prompt_text) else None
+            wants_homeharvest = _should_enable_homeharvest(prompt_text)
+            report_prompt = await _enrich_report_generation_prompt_with_arcgis(
+                prompt_text,
+                include_homeharvest=wants_homeharvest,
+            )
+            if wants_homeharvest:
+                report_prompt = _enrich_homeharvest_prompt(report_prompt)
+            action_id = HOMEHARVEST_ACTION_ID if wants_homeharvest else None
             poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else REPORT_GENERATION_POLL_SECONDS
             raw_result = await _call_customgpt_task(
                 ASSESSMENT_PROJECT_ID,
@@ -1867,25 +1936,35 @@ def _require_config(project_id: str, tool_name: str) -> Optional[str]:
 
 def _request_needs_homeharvest(prompt_text: str) -> bool:
     """
-    True only when the user asks for market/listing/sale/comp/public aggregator
-    work. Plain address lookup should stay ArcGIS-only and return immediately.
+    True when the user asks for HomeHarvest/public aggregator market support:
+    comps, sales, listings, sold properties, market data, or similar external
+    public-aggregator context. Plain address lookup stays ArcGIS-only.
     """
     text = (prompt_text or "").lower()
 
-    explicit_mode = (
-        "mode: address / homeharvest lookup" in text
-        or "mode: record + homeharvest comp support" in text
-        or "homeharvest" in text
-        or "public aggregator" in text
-    )
+    explicit_mode_or_source = [
+        "mode: address / homeharvest lookup",
+        "mode: record + homeharvest comp support",
+        "mode: address report + homeharvest market support",
+        "homeharvest",
+        "home harvest",
+        "public aggregator",
+        "public-aggregator",
+        "aggregator data",
+        "external market data",
+    ]
+    if any(phrase in text for phrase in explicit_mode_or_source):
+        return True
 
-    comp_or_listing_words = [
+    market_words = [
         "comp",
         "comps",
         "comparable",
+        "comparables",
         "similar properties",
         "nearby sales",
         "nearby sale",
+        "recent sales",
         "sales nearby",
         "sold properties",
         "sold property",
@@ -1899,12 +1978,13 @@ def _request_needs_homeharvest(prompt_text: str) -> bool:
         "pending listing",
         "for sale",
         "market support",
+        "market data",
+        "market activity",
         "market value support",
         "candidate comps",
     ]
 
-    return explicit_mode or any(word in text for word in comp_or_listing_words)
-
+    return any(word in text for word in market_words)
 
 
 
@@ -1917,6 +1997,7 @@ def _request_needs_report_generation(prompt_text: str) -> bool:
 
     explicit_modes = [
         "mode: address report generation",
+        "mode: address report + homeharvest market support",
         "mode: report generation",
         "report generation",
         "file generation",
@@ -2021,6 +2102,7 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "- Prefer operation homeharvestSearchProperties.\n"
     "- Use POST /properties/search.\n"
     "- Return staff-readable numbered cards, not raw JSON.\n"
+    "- For report-generation requests, include the HomeHarvest/Public Aggregator Market Support section in the report text and any generated file.\n"
     "- A no-result response is not a tool failure.\n"
     "\n"
     "GIS + HOMEHARVEST RULES:\n"
@@ -2664,16 +2746,23 @@ async def _call_customgpt_task(
     if not prompt_text:
         return f"{tool_name} received an empty promptText."
 
-    if tool_name == "Assessment_Context_Expert" and action_id:
+    if tool_name == "Assessment_Context_Expert" and _request_needs_report_generation(prompt_text):
+        # Report/file/PDF/export generation should always get ArcGIS context when
+        # an address or UPC is present. If the staff request also asks for
+        # HomeHarvest/comps/sales/listings/market data, keep HomeHarvest enabled
+        # and add report-specific market-support instructions.
+        include_homeharvest = bool(action_id) or _should_enable_homeharvest(prompt_text)
+        prompt_text = await _enrich_report_generation_prompt_with_arcgis(
+            prompt_text,
+            include_homeharvest=include_homeharvest,
+        )
+        if include_homeharvest and action_id:
+            prompt_text = _enrich_homeharvest_prompt(prompt_text)
+    elif tool_name == "Assessment_Context_Expert" and action_id:
         # ArcGIS runs first as a fast public parcel pre-check, then the combined
         # prompt is enriched with HomeHarvest instructions and submitted to CustomGPT.
         prompt_text = await _enrich_homeharvest_prompt_with_arcgis(prompt_text)
         prompt_text = _enrich_homeharvest_prompt(prompt_text)
-    elif tool_name == "Assessment_Context_Expert" and _request_needs_report_generation(prompt_text):
-        # Report/file/PDF/export generation should still get GIS context when an
-        # address or UPC is present, but should not force HomeHarvest unless the
-        # staff request also asks for comps/sales/listings/market data.
-        prompt_text = await _enrich_report_generation_prompt_with_arcgis(prompt_text)
 
     _log("specialist tool received prompt", tool=tool_name, project=project_id, action_id=action_id or "", prompt_preview=_safe_json_dumps(prompt_text[:800], 900))
 
