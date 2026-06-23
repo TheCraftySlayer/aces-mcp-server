@@ -5,7 +5,14 @@ import asyncio
 import hashlib
 import time
 import secrets
+from datetime import datetime, timezone
+from urllib.parse import quote_plus
 from typing import Optional, Any, Dict, List, Tuple
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - Python < 3.9 fallback
+    ZoneInfo = None
 
 # FastMCP reads these through settings/env for Streamable HTTP behavior.
 os.environ.setdefault("FASTMCP_STATELESS_HTTP", "true")
@@ -20,12 +27,14 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes six tools: Community_Educator, Assessment_Context_Expert, "
+        "Exposes seven tools: Community_Educator, Assessment_Context_Expert, "
         "Clear_Expectations, Compliance_Expert, Check_CustomGPT_Task, "
-        "and ArcGIS_Public_Parcel_Lookup. "
+        "ArcGIS_Public_Parcel_Lookup, and ArcGIS_Public_Parcel_Map. "
         "The four CustomGPT specialist tools take exactly one promptText string and return plain text. "
         "Check_CustomGPT_Task takes projectId and taskId to retrieve a delayed task result. "
-        "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
+        "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. "
+        "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
+        "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
     ),
 )
 
@@ -49,6 +58,17 @@ ARCGIS_PUBLIC_PARCEL_LAYER_URL = os.getenv(
     "https://assessormap.bernco.gov/server/rest/services/GIS/Assessor_Parcels_Public/MapServer/0",
 ).rstrip("/")
 ARCGIS_PUBLIC_PARCEL_MAX_RESULTS = int(os.getenv("ARCGIS_PUBLIC_PARCEL_MAX_RESULTS", "10"))
+
+# BernCo Assessor Experience Builder app. The data source ID is from the public
+# Assessor map URL fragment and is used with OBJECTID to open/select a parcel.
+BERNCO_EXPERIENCE_APP_URL = os.getenv(
+    "BERNCO_EXPERIENCE_APP_URL",
+    "https://assessormap.bernco.gov/portal/apps/experiencebuilder/experience/?id=9757f76e51d048d393c44d6487771bf7",
+).rstrip("/")
+BERNCO_EXPERIENCE_DATA_SOURCE_ID = os.getenv(
+    "BERNCO_EXPERIENCE_DATA_SOURCE_ID",
+    "f0093002972e4f1e823c0368ea06cf75-19e83adb259-layer-9-1",
+).strip()
 
 # When true, Assessment_Context_Expert HomeHarvest/address/comps tasks are
 # pre-enriched with public ArcGIS parcel context before the CustomGPT task is
@@ -108,6 +128,41 @@ REUSE_RUNNING_HOMEHARVEST_TASKS = os.getenv("ACES_REUSE_RUNNING_HOMEHARVEST_TASK
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _today_mountain_date():
+    """Return today's date in America/Denver, falling back safely to UTC."""
+    try:
+        if ZoneInfo is not None:
+            return datetime.now(ZoneInfo("America/Denver")).date()
+    except Exception:
+        pass
+    return datetime.now(timezone.utc).date()
+
+
+def _past_years_date_range(years: int = 10) -> Tuple[str, str]:
+    """Return YYYY-MM-DD date_from/date_to for a rolling lookback window."""
+    today = _today_mountain_date()
+    years = max(1, int(years or 10))
+    try:
+        start = today.replace(year=today.year - years)
+    except ValueError:
+        # Handles leap-day current dates.
+        start = today.replace(year=today.year - years, month=2, day=28)
+    return start.isoformat(), today.isoformat()
+
+
+def _has_any_word_or_phrase(text: str, terms: List[str]) -> bool:
+    """Match whole words/phrases so 'comp' does not match 'complete' or 'compliance'."""
+    value = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    for term in terms:
+        term_value = re.sub(r"\s+", " ", (term or "").lower()).strip()
+        if not term_value:
+            continue
+        pattern = r"(?<![a-z0-9])" + re.escape(term_value) + r"(?![a-z0-9])"
+        if re.search(pattern, value):
+            return True
+    return False
 
 
 def _stable_hash(text: str) -> str:
@@ -222,13 +277,13 @@ def _canonical_prompt_for_cache(tool_name: str, prompt_text: str) -> str:
 
         address = _extract_address_for_cache(raw)
 
-        wants_comps = any(
-            word in norm
-            for word in ["comp", "comps", "nearby sale", "nearby sales", "sold", "sale", "sales", "market", "similar"]
+        wants_comps = _has_any_word_or_phrase(
+            norm,
+            ["comp", "comps", "nearby sale", "nearby sales", "sold", "sale", "sales", "market", "similar"],
         )
-        wants_listing = any(word in norm for word in ["listing", "listings", "active", "for sale"])
+        wants_listing = _has_any_word_or_phrase(norm, ["listing", "listings", "active", "for sale"])
         wants_report = _request_needs_report_generation(raw)
-        wants_lookup = any(word in norm for word in ["look up", "lookup", "property", "address", "homeharvest"])
+        wants_lookup = _has_any_word_or_phrase(norm, ["look up", "lookup", "property", "address", "homeharvest"])
 
         if wants_report:
             intent = "report_generation"
@@ -539,10 +594,12 @@ def _normalize_aces_result(
 
     task_not_found_markers = [
         "task not found",
-        "not found",
-        "404",
-        "consumed",
-        "expired",
+        "customgpt task not found",
+        "task check failed: 404",
+        "http_status\": 404",
+        "task was consumed",
+        "task expired",
+        "download link expired",
     ]
     if any(marker in lower for marker in task_not_found_markers):
         return {
@@ -918,6 +975,79 @@ def _fmt_arcgis_money(value: Any) -> str:
         return f"${float(value):,.0f}"
     except Exception:
         return str(value)
+
+
+def _build_bernco_assessor_map_link(parcel: Dict[str, Any]) -> str:
+    """Build a BernCo Assessor Experience Builder link that selects the parcel by OBJECTID."""
+    object_id = parcel.get("object_id") or parcel.get("oid")
+    if not object_id or not BERNCO_EXPERIENCE_DATA_SOURCE_ID or not BERNCO_EXPERIENCE_APP_URL:
+        return ""
+
+    return (
+        f"{BERNCO_EXPERIENCE_APP_URL}"
+        f"#data_s=id%3A{BERNCO_EXPERIENCE_DATA_SOURCE_ID}%3A{object_id}"
+        f"&zoom_to_selection=true"
+    )
+
+
+def _build_google_maps_routing_links(parcel: Dict[str, Any]) -> Dict[str, str]:
+    """Build Google Maps search/directions URLs from the public GIS situs address."""
+    situs = parcel.get("situs_address") or ""
+    if not situs:
+        return {}
+
+    destination = quote_plus(f"{situs}, Bernalillo County, NM")
+    return {
+        "google_maps_directions": (
+            "https://www.google.com/maps/dir/?api=1"
+            f"&destination={destination}"
+            "&travelmode=driving"
+        ),
+        "google_maps_search": (
+            "https://www.google.com/maps/search/?api=1"
+            f"&query={destination}"
+        ),
+    }
+
+
+def _format_arcgis_map_routing_text(result: Dict[str, Any]) -> str:
+    """Format BernCo Assessor map and Google Maps routing links for staff."""
+    status = str(result.get("status") or "")
+    answer = str(result.get("answer") or "").strip()
+    if status != "completed":
+        return answer or "No matching public ArcGIS parcel record was found."
+
+    lines = [
+        answer,
+        "Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
+        "Limit: Map/location support only. This is not a certified record, final appraisal, tax/legal decision, or routing guarantee.",
+        "Note: BernCo Assessor Map opens the public Assessor map and selects the parcel by OBJECTID. Google Maps uses the public GIS situs address for driving directions.",
+        "",
+    ]
+
+    for idx, item in enumerate(result.get("results") or [], start=1):
+        bernco_map = _build_bernco_assessor_map_link(item)
+        google_links = _build_google_maps_routing_links(item)
+
+        lines.extend(
+            [
+                f"{idx}. {item.get('situs_address') or 'Unknown situs address'}",
+                f"   UPC/PIN: {item.get('upc') or ''} / {item.get('pin') or ''}",
+                f"   Owner: {item.get('owner') or ''}",
+                f"   OBJECTID: {item.get('object_id') or ''}",
+            ]
+        )
+
+        if bernco_map:
+            lines.append(f"   BernCo Assessor Map: {bernco_map}")
+        if google_links.get("google_maps_directions"):
+            lines.append(f"   Google Maps Directions: {google_links['google_maps_directions']}")
+        if google_links.get("google_maps_search"):
+            lines.append(f"   Google Maps Search: {google_links['google_maps_search']}")
+
+        lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
@@ -1478,7 +1608,7 @@ async def health_check(request):
             "status": "healthy",
             "service": "aces-mcp-server",
             "mcp_endpoint": "/mcp",
-            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup", "/context-expert-file/{token}"],
+            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup", "/arcgis-parcel-map", "/context-expert-file/{token}"],
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
             "homeharvest_action_id": HOMEHARVEST_ACTION_ID,
             "arcgis_public_parcel_layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
@@ -1508,6 +1638,7 @@ async def health_check(request):
                 "Compliance_Expert",
                 "Check_CustomGPT_Task",
                 "ArcGIS_Public_Parcel_Lookup",
+                "ArcGIS_Public_Parcel_Map",
             ],
         }
     )
@@ -1687,12 +1818,79 @@ async def arcgis_parcel_lookup_route(request):
 
 
 
+@mcp.custom_route("/arcgis-parcel-map", methods=["GET", "POST"])
+async def arcgis_parcel_map_route(request):
+    """
+    Fast read-only REST wrapper that returns BernCo Assessor map links and
+    Google Maps routing links for a public parcel/address/UPC.
+
+    POST /arcgis-parcel-map
+    Headers:
+      x-aces-admin-token: <ACES_ADMIN_TOKEN>
+      Content-Type: application/json
+    Body:
+      {"searchText": "2 Lauren Taylor Ct Tijeras NM", "maxResults": 5}
+
+    Also supports GET:
+      /arcgis-parcel-map?searchText=2%20Lauren%20Taylor%20Ct%20Tijeras%20NM&maxResults=5
+    """
+    auth_response = _require_rest_auth(request)
+    if auth_response:
+        return auth_response
+
+    if request.method == "GET":
+        body: Dict[str, Any] = {}
+    else:
+        body = await _request_json_or_empty(request)
+
+    search_text = str(
+        body.get("searchText")
+        or body.get("search_text")
+        or body.get("promptText")
+        or body.get("prompt_text")
+        or request.query_params.get("searchText")
+        or request.query_params.get("search_text")
+        or request.query_params.get("promptText")
+        or ""
+    ).strip()
+
+    max_results_raw = (
+        body.get("maxResults")
+        or body.get("max_results")
+        or request.query_params.get("maxResults")
+        or request.query_params.get("max_results")
+        or 5
+    )
+
+    gis_result = await _arcgis_public_parcel_lookup_result(
+        search_text=search_text,
+        max_results=max_results_raw,
+        return_geometry=False,
+    )
+    answer = _format_arcgis_map_routing_text(gis_result)
+
+    return JSONResponse(
+        {
+            "status": "completed" if gis_result.get("status") in {"completed", "empty"} else "failed",
+            "answer": answer,
+            "task_id": "",
+            "project_id": ASSESSMENT_PROJECT_ID,
+            "source": gis_result.get("source", "Bernalillo County Assessor Parcels public ArcGIS layer"),
+            "layer_url": gis_result.get("layer_url", ARCGIS_PUBLIC_PARCEL_LAYER_URL),
+            "query_mode": gis_result.get("query_mode", ""),
+            "where": gis_result.get("where", ""),
+            "count": gis_result.get("count", 0),
+            "results": gis_result.get("results", []),
+        }
+    )
+
+
 @mcp.custom_route("/start-lookup", methods=["POST"])
 async def start_lookup_route(request):
     """
     REST wrapper for Power Automate/Copilot Studio.
 
-    Plain address/parcel lookups return a fast ArcGIS-only response.
+    Plain address/parcel lookups and map/directions requests return a fast ArcGIS-only response.
     Requests for comps, sales, listings, market support, HomeHarvest, public
     aggregator data, reports, exports, PDFs, files, or downloads submit the
     full prompt to Assessment_Context_Expert, with ArcGIS context when available.
@@ -1743,6 +1941,26 @@ async def start_lookup_route(request):
             )
             normalized = _normalize_aces_result(raw_result, project_id=ASSESSMENT_PROJECT_ID)
             return JSONResponse(normalized)
+
+        # Fast path: map/location/directions requests should return direct
+        # BernCo Assessor map and Google Maps links without spawning CustomGPT.
+        if _should_use_arcgis_map_lookup(prompt_text):
+            search_text = _extract_arcgis_search_text_from_prompt(prompt_text) or prompt_text
+            gis_result = await _arcgis_public_parcel_lookup_result(
+                search_text=search_text,
+                max_results=5,
+                return_geometry=False,
+            )
+            answer = _format_arcgis_map_routing_text(gis_result)
+            status = "completed" if gis_result.get("status") in {"completed", "empty"} else "failed"
+            return JSONResponse(
+                {
+                    "status": status,
+                    "answer": answer,
+                    "task_id": "",
+                    "project_id": ASSESSMENT_PROJECT_ID,
+                }
+            )
 
         # Fast path: plain address/parcel lookup should not spawn a long
         # HomeHarvest/CustomGPT task or return comps unless staff asked for comps,
@@ -1877,6 +2095,20 @@ async def agent_call_route(request):
         result = await _arcgis_public_parcel_lookup_result(prompt_text)
         return JSONResponse(result)
 
+    if agent in {"ArcGIS_Public_Parcel_Map", "ArcGIS_Parcel_Map", "ArcGIS_Map", "Parcel_Map"}:
+        result = await _arcgis_public_parcel_lookup_result(prompt_text, max_results=5, return_geometry=False)
+        answer = _format_arcgis_map_routing_text(result)
+        return JSONResponse(
+            {
+                "status": "completed" if result.get("status") in {"completed", "empty"} else "failed",
+                "answer": answer,
+                "task_id": "",
+                "project_id": ASSESSMENT_PROJECT_ID,
+                "source": result.get("source", "Bernalillo County Assessor Parcels public ArcGIS layer"),
+                "results": result.get("results", []),
+            }
+        )
+
     agent_map = {
         "Community_Educator": (COMMUNITY_PROJECT_ID, "Community_Educator", None, DEFAULT_POLL_SECONDS),
         "Clear_Expectations": (CLEAR_PROJECT_ID, "Clear_Expectations", None, DEFAULT_POLL_SECONDS),
@@ -1893,7 +2125,7 @@ async def agent_call_route(request):
         return JSONResponse(
             {
                 "status": "failed",
-                "answer": "Invalid agent. Use Community_Educator, Assessment_Context_Expert, Clear_Expectations, Compliance_Expert, or ArcGIS_Public_Parcel_Lookup.",
+                "answer": "Invalid agent. Use Community_Educator, Assessment_Context_Expert, Clear_Expectations, Compliance_Expert, ArcGIS_Public_Parcel_Lookup, or ArcGIS_Public_Parcel_Map.",
                 "task_id": "",
                 "project_id": "",
             }
@@ -1938,7 +2170,7 @@ def _request_needs_homeharvest(prompt_text: str) -> bool:
     """
     True when the user asks for HomeHarvest/public aggregator market support:
     comps, sales, listings, sold properties, market data, or similar external
-    public-aggregator context. Plain address lookup stays ArcGIS-only.
+    public-aggregator context. Plain address and map/directions lookups stay ArcGIS-only.
     """
     text = (prompt_text or "").lower()
 
@@ -1953,7 +2185,7 @@ def _request_needs_homeharvest(prompt_text: str) -> bool:
         "aggregator data",
         "external market data",
     ]
-    if any(phrase in text for phrase in explicit_mode_or_source):
+    if _has_any_word_or_phrase(text, explicit_mode_or_source):
         return True
 
     market_words = [
@@ -1984,8 +2216,7 @@ def _request_needs_homeharvest(prompt_text: str) -> bool:
         "candidate comps",
     ]
 
-    return any(word in text for word in market_words)
-
+    return _has_any_word_or_phrase(text, market_words)
 
 
 def _request_needs_report_generation(prompt_text: str) -> bool:
@@ -2042,6 +2273,41 @@ def _request_needs_report_generation(prompt_text: str) -> bool:
     return any(phrase in text for phrase in report_or_file_phrases)
 
 
+def _request_needs_map_routing(prompt_text: str) -> bool:
+    """True when staff asks to map, locate, route to, or get directions to a parcel/address."""
+    text = (prompt_text or "").lower()
+    map_terms = [
+        "map",
+        "maps",
+        "google maps",
+        "google map",
+        "directions",
+        "direction",
+        "route",
+        "routing",
+        "navigate",
+        "navigation",
+        "locate",
+        "location",
+        "open on map",
+        "show on map",
+        "show me on map",
+        "assessor map",
+        "bernco map",
+    ]
+    return _has_any_word_or_phrase(text, map_terms)
+
+
+def _should_use_arcgis_map_lookup(prompt_text: str) -> bool:
+    """Use map fast path only for map/location/direction requests, not comps/reports."""
+    return (
+        _looks_like_arcgis_lookup(prompt_text)
+        and _request_needs_map_routing(prompt_text)
+        and not _request_needs_homeharvest(prompt_text)
+        and not _request_needs_report_generation(prompt_text)
+    )
+
+
 def _looks_like_arcgis_lookup(prompt_text: str) -> bool:
     """Detect a plain address/UPC/property lookup that can be answered by ArcGIS.
 
@@ -2095,6 +2361,8 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     if "homeharvest action rule" in text.lower():
         return text
 
+    date_from, date_to = _past_years_date_range(10)
+
     action_rule = (
     "\n\nHOMEHARVEST ACTION RULE:\n"
     "- Use the enabled HomeHarvest custom action when the request is an address, nearby sale, or comp lookup.\n"
@@ -2113,7 +2381,7 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "\n"
     "COMP SEARCH QUALITY RULES:\n"
     "- For comp requests, use listing_type=sold or sold status when supported.\n"
-    "- For 'past 10 years', use date_from=2016-06-22 and date_to=2026-06-22 unless the user gives a different date range.\n"
+    f"- For 'past 10 years', use date_from={date_from} and date_to={date_to} unless the user gives a different date range.\n"
     "- Exclude land, lots, mobile homes, manufactured homes, rentals, active listings, pending listings, and rows with missing price, missing date, missing sqft, or missing residential characteristics.\n"
     "- Do not return exactly 10 unless 10 usable residential candidates are found.\n"
     "- If fewer than 10 usable residential candidates are found, return only the usable candidates and clearly say how many were found.\n"
@@ -2998,6 +3266,19 @@ async def ArcGIS_Public_Parcel_Lookup(searchText: str, maxResults: int = 10) -> 
     """
     result = await _arcgis_public_parcel_lookup_result(searchText, maxResults)
     return _format_arcgis_parcel_lookup_text(result)
+
+
+
+@mcp.tool
+async def ArcGIS_Public_Parcel_Map(searchText: str, maxResults: int = 5) -> str:
+    """
+    Use for map, locate, directions, route, Google Maps, or open-on-map requests
+    for a Bernalillo County parcel/address/UPC. Returns a BernCo Assessor map
+    link selected by OBJECTID and Google Maps search/directions links based on
+    the public GIS situs address. Not a certified record or routing guarantee.
+    """
+    result = await _arcgis_public_parcel_lookup_result(searchText, maxResults, return_geometry=False)
+    return _format_arcgis_map_routing_text(result)
 
 
 @mcp.tool
