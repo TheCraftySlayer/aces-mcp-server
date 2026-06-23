@@ -27,13 +27,14 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes seven tools: Community_Educator, Assessment_Context_Expert, "
+        "Exposes eight tools: Community_Educator, Assessment_Context_Expert, "
         "Clear_Expectations, Compliance_Expert, Check_CustomGPT_Task, "
-        "ArcGIS_Public_Parcel_Lookup, and ArcGIS_Public_Parcel_Map. "
+        "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, and ArcGIS_Public_Candidate_Peers. "
         "The four CustomGPT specialist tools take exactly one promptText string and return plain text. "
         "Check_CustomGPT_Task takes projectId and taskId to retrieve a delayed task result. "
         "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. "
         "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
+        "ArcGIS_Public_Candidate_Peers returns ArcGIS-only candidate parcel peers for comp triage when living area/sale data is unavailable in GIS. "
         "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
     ),
 )
@@ -58,6 +59,13 @@ ARCGIS_PUBLIC_PARCEL_LAYER_URL = os.getenv(
     "https://assessormap.bernco.gov/server/rest/services/GIS/Assessor_Parcels_Public/MapServer/0",
 ).rstrip("/")
 ARCGIS_PUBLIC_PARCEL_MAX_RESULTS = int(os.getenv("ARCGIS_PUBLIC_PARCEL_MAX_RESULTS", "10"))
+
+# ArcGIS-only candidate peer search. These are NOT final comparable sales;
+# they are parcel peers used to guide HomeHarvest/CAMA/MLS enrichment when the
+# public GIS layer lacks living-area and verified sale fields.
+ARCGIS_CANDIDATE_PEER_MAX_RESULTS = int(os.getenv("ACES_ARCGIS_CANDIDATE_PEER_MAX_RESULTS", "25"))
+ARCGIS_CANDIDATE_PEER_RADIUS_MILES = os.getenv("ACES_ARCGIS_CANDIDATE_PEER_RADIUS_MILES", "1,3,5,10").strip()
+
 
 # BernCo Assessor Experience Builder app. The data source ID is from the public
 # Assessor map URL fragment and is used with OBJECTID to open/select a parcel.
@@ -1239,6 +1247,471 @@ async def _arcgis_public_parcel_lookup_result(
 
 
 
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _arcgis_candidate_radius_values() -> List[float]:
+    values: List[float] = []
+    for raw in re.split(r"[,;\s]+", ARCGIS_CANDIDATE_PEER_RADIUS_MILES or ""):
+        try:
+            miles = float(raw)
+        except Exception:
+            continue
+        if miles > 0:
+            values.append(miles)
+    return values or [1.0, 3.0, 5.0, 10.0]
+
+
+def _arcgis_sql_equals(field: str, value: Any) -> str:
+    return f"{field} = '{_clean_arcgis_sql_text(str(value))}'"
+
+
+def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """
+    Build progressively broader where clauses for ArcGIS-only parcel peers.
+    These clauses intentionally avoid square footage/sale data because the public
+    ArcGIS layer does not provide those fields.
+    """
+    tax_year = subject.get("tax_year") or subject.get("int_tax_year")
+    upc = subject.get("upc") or subject.get("txt_upc")
+    object_id = subject.get("object_id") or subject.get("oid")
+    roll_type = subject.get("roll_type")
+    prop_class = subject.get("property_class")
+    val_class = subject.get("valuation_class")
+    luc = subject.get("land_use_code")
+    tax_district = subject.get("tax_district")
+    style = subject.get("style")
+
+    base: List[str] = []
+    if tax_year:
+        base.append(_arcgis_sql_equals("TAXYR", tax_year))
+    if upc:
+        safe_upc = _clean_arcgis_sql_text(str(upc))
+        base.append(f"(UPC IS NULL OR UPC <> '{safe_upc}')")
+    if object_id:
+        try:
+            base.append(f"OBJECTID <> {int(float(object_id))}")
+        except Exception:
+            pass
+
+    def build(extra: List[str]) -> str:
+        clauses = base + [item for item in extra if item]
+        return " AND ".join(clauses) if clauses else "1=1"
+
+    stages: List[Tuple[str, str]] = []
+
+    # Tightest: same public GIS class/use/style/tax district when available.
+    tight: List[str] = []
+    if roll_type:
+        tight.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
+    if prop_class:
+        tight.append(_arcgis_sql_equals("PROPCLASS", prop_class))
+    if val_class:
+        tight.append(_arcgis_sql_equals("VALCLASS", val_class))
+    if luc:
+        tight.append(_arcgis_sql_equals("LUC", luc))
+    if style:
+        tight.append(_arcgis_sql_equals("STYLE", style))
+    if tax_district:
+        tight.append(_arcgis_sql_equals("TAXDIST", tax_district))
+    if tight:
+        stages.append(("same_class_use_style_taxdist", build(tight)))
+
+    strong: List[str] = []
+    if roll_type:
+        strong.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
+    if prop_class:
+        strong.append(_arcgis_sql_equals("PROPCLASS", prop_class))
+    if luc:
+        strong.append(_arcgis_sql_equals("LUC", luc))
+    if strong:
+        stages.append(("same_roll_propclass_luc", build(strong)))
+
+    moderate: List[str] = []
+    if roll_type:
+        moderate.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
+    if prop_class:
+        moderate.append(_arcgis_sql_equals("PROPCLASS", prop_class))
+    if moderate:
+        stages.append(("same_roll_propclass", build(moderate)))
+
+    broad: List[str] = []
+    if roll_type:
+        broad.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
+    elif prop_class:
+        broad.append(_arcgis_sql_equals("PROPCLASS", prop_class))
+    if broad:
+        stages.append(("same_roll_or_class", build(broad)))
+
+    stages.append(("nearby_public_parcels", build([])))
+
+    seen = set()
+    unique: List[Tuple[str, str]] = []
+    for name, where in stages:
+        if where not in seen:
+            seen.add(where)
+            unique.append((name, where))
+    return unique
+
+
+def _arcgis_candidate_peer_score(subject: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Score public GIS candidate peers using only fields available in ArcGIS."""
+    score = 0.0
+    reasons: List[str] = []
+
+    def same(field: str, label: str, points: float) -> None:
+        nonlocal score
+        left = str(subject.get(field) or "").strip().upper()
+        right = str(candidate.get(field) or "").strip().upper()
+        if left and right and left == right:
+            score += points
+            reasons.append(label)
+
+    same("roll_type", "same roll type", 8)
+    same("property_class", "same property class", 18)
+    same("valuation_class", "same valuation class", 10)
+    same("land_use_code", "same land use code", 22)
+    same("tax_district", "same tax district", 8)
+    same("style", "same style", 10)
+
+    subject_year = _float_or_none(subject.get("year_built"))
+    candidate_year = _float_or_none(candidate.get("year_built"))
+    if subject_year is not None and candidate_year is not None:
+        diff = abs(subject_year - candidate_year)
+        if diff <= 5:
+            score += 12
+            reasons.append("year built within 5 years")
+        elif diff <= 10:
+            score += 9
+            reasons.append("year built within 10 years")
+        elif diff <= 20:
+            score += 5
+            reasons.append("year built within 20 years")
+
+    subject_acres = _float_or_none(subject.get("acreage"))
+    candidate_acres = _float_or_none(candidate.get("acreage"))
+    if subject_acres and candidate_acres:
+        ratio_diff = abs(candidate_acres - subject_acres) / max(subject_acres, 0.01)
+        if ratio_diff <= 0.20:
+            score += 10
+            reasons.append("acreage within 20%")
+        elif ratio_diff <= 0.50:
+            score += 6
+            reasons.append("acreage within 50%")
+        elif ratio_diff <= 1.00:
+            score += 3
+            reasons.append("acreage within 100%")
+
+    subject_coords = subject.get("coordinates") or {}
+    cand_coords = candidate.get("coordinates") or {}
+    sx = _float_or_none(subject_coords.get("x"))
+    sy = _float_or_none(subject_coords.get("y"))
+    cx = _float_or_none(cand_coords.get("x"))
+    cy = _float_or_none(cand_coords.get("y"))
+    distance_miles: Optional[float] = None
+    if sx is not None and sy is not None and cx is not None and cy is not None:
+        distance_miles = (((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5) / 5280.0
+        if distance_miles <= 1:
+            score += 12
+            reasons.append("within 1 mile")
+        elif distance_miles <= 3:
+            score += 9
+            reasons.append("within 3 miles")
+        elif distance_miles <= 5:
+            score += 6
+            reasons.append("within 5 miles")
+        elif distance_miles <= 10:
+            score += 3
+            reasons.append("within 10 miles")
+
+    return {
+        "candidate_score": round(min(score, 100.0), 1),
+        "distance_miles": round(distance_miles, 3) if distance_miles is not None else None,
+        "match_reasons": reasons[:12],
+        "missing_for_final_comp": [
+            "living/building square footage from an official or approved source",
+            "verified sale date",
+            "verified sale price",
+        ],
+    }
+
+
+async def _arcgis_public_candidate_peers_result(
+    search_text: str,
+    max_results: int = 10,
+) -> Dict[str, Any]:
+    """
+    Find ArcGIS-only candidate parcel peers around a subject.
+
+    This is intentionally a comp-triage helper, not a comparable-sales tool.
+    The public ArcGIS layer lacks living-area and verified sale fields, so the
+    output must be enriched with HomeHarvest/CAMA/MLS before final comp use.
+    """
+    try:
+        max_results_int = max(1, min(int(max_results), ARCGIS_CANDIDATE_PEER_MAX_RESULTS))
+    except Exception:
+        max_results_int = 10
+
+    subject_lookup = await _arcgis_public_parcel_lookup_result(
+        search_text=search_text,
+        max_results=5,
+        return_geometry=False,
+    )
+    if subject_lookup.get("status") != "completed" or int(subject_lookup.get("count") or 0) != 1:
+        return {
+            "status": "needs_subject_selection" if subject_lookup.get("status") == "completed" else subject_lookup.get("status", "empty"),
+            "answer": (
+                "ArcGIS candidate peer search needs exactly one subject parcel. "
+                f"Subject lookup status: {subject_lookup.get('status')}; count: {subject_lookup.get('count', 0)}."
+            ),
+            "task_id": "",
+            "project_id": "",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
+            "subject_lookup": subject_lookup,
+            "subject": None,
+            "peers": [],
+        }
+
+    subject = (subject_lookup.get("results") or [None])[0]
+    if not isinstance(subject, dict):
+        return {
+            "status": "failed",
+            "answer": "ArcGIS subject lookup did not return a usable normalized subject parcel.",
+            "task_id": "",
+            "project_id": "",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
+            "subject_lookup": subject_lookup,
+            "subject": None,
+            "peers": [],
+        }
+
+    coords = subject.get("coordinates") or {}
+    sx = _float_or_none(coords.get("x"))
+    sy = _float_or_none(coords.get("y"))
+    if sx is None or sy is None:
+        return {
+            "status": "failed",
+            "answer": "ArcGIS subject parcel did not include X_Coord/Y_Coord, so distance-based candidate peer search could not run.",
+            "task_id": "",
+            "project_id": "",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
+            "subject_lookup": subject_lookup,
+            "subject": subject,
+            "peers": [],
+        }
+
+    timeout = httpx.Timeout(connect=10, read=30, write=20, pool=10)
+    stages = _arcgis_candidate_where_stages(subject)
+    radii = _arcgis_candidate_radius_values()
+    last_error: Optional[Any] = None
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for radius_miles in radii:
+            for stage_name, where_clause in stages:
+                params = {
+                    "f": "json",
+                    "where": where_clause,
+                    "outFields": ARCGIS_PUBLIC_PARCEL_OUT_FIELDS,
+                    "returnGeometry": "false",
+                    "resultRecordCount": str(max(50, max_results_int * 5)),
+                    "geometry": json.dumps({"x": sx, "y": sy, "spatialReference": {"wkid": 2903}}),
+                    "geometryType": "esriGeometryPoint",
+                    "inSR": "2903",
+                    "spatialRel": "esriSpatialRelIntersects",
+                    "distance": str(float(radius_miles) * 5280.0),
+                    "units": "esriSRUnit_Foot",
+                }
+                try:
+                    response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params)
+                    data = await _read_json_or_text(response)
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
+
+                if response.status_code >= 400:
+                    last_error = {"http_status": response.status_code, "response": data}
+                    continue
+                if isinstance(data, dict) and data.get("error"):
+                    last_error = data.get("error")
+                    continue
+
+                features = data.get("features", []) if isinstance(data, dict) else []
+                peers: List[Dict[str, Any]] = []
+                seen_keys = set()
+                subject_upc = str(subject.get("upc") or subject.get("txt_upc") or "").strip()
+                subject_oid = str(subject.get("object_id") or subject.get("oid") or "").strip()
+
+                for feature in features:
+                    peer = _normalize_arcgis_parcel(feature.get("attributes", {}) or {})
+                    peer_upc = str(peer.get("upc") or peer.get("txt_upc") or "").strip()
+                    peer_oid = str(peer.get("object_id") or peer.get("oid") or "").strip()
+                    if subject_upc and peer_upc and peer_upc == subject_upc:
+                        continue
+                    if subject_oid and peer_oid and peer_oid == subject_oid:
+                        continue
+                    key = peer_upc or peer_oid or peer.get("situs_address")
+                    if not key or key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    peer.update(_arcgis_candidate_peer_score(subject, peer))
+                    peers.append(peer)
+
+                if peers:
+                    peers.sort(key=lambda item: (item.get("candidate_score") or 0, -1 * (item.get("distance_miles") or 999)), reverse=True)
+                    selected = peers[:max_results_int]
+                    return {
+                        "status": "completed",
+                        "answer": (
+                            f"Found {len(selected)} ArcGIS candidate parcel peer(s) within {radius_miles:g} mile(s) "
+                            f"using stage '{stage_name}'. These are not final comparable sales because ArcGIS does not provide living area or verified sale fields."
+                        ),
+                        "task_id": "",
+                        "project_id": "",
+                        "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
+                        "layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
+                        "subject_lookup": subject_lookup,
+                        "subject": subject,
+                        "radius_miles": radius_miles,
+                        "query_stage": stage_name,
+                        "where": where_clause,
+                        "count": len(selected),
+                        "peers": selected,
+                    }
+
+    if last_error:
+        return {
+            "status": "failed",
+            "answer": f"ArcGIS candidate peer search failed or returned an error: {_safe_json_dumps(last_error, 1200)}",
+            "task_id": "",
+            "project_id": "",
+            "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
+            "subject_lookup": subject_lookup,
+            "subject": subject,
+            "peers": [],
+        }
+
+    return {
+        "status": "empty",
+        "answer": "No ArcGIS candidate parcel peers were found in the configured search radii.",
+        "task_id": "",
+        "project_id": "",
+        "source": "Bernalillo County Assessor Parcels public ArcGIS layer",
+        "subject_lookup": subject_lookup,
+        "subject": subject,
+        "peers": [],
+    }
+
+
+def _format_arcgis_candidate_peers_text(result: Dict[str, Any]) -> str:
+    status = str(result.get("status") or "")
+    answer = str(result.get("answer") or "").strip()
+    lines = [
+        answer or "ArcGIS candidate peer search did not return usable results.",
+        "Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
+        "Limit: ArcGIS-only candidate parcel peers. These are not final comparable sales because the public GIS layer does not include living area, verified sale date, or verified sale price.",
+        "Use: Enrich with HomeHarvest/public aggregator data and verify final use in iasWorld/CAMA, MLS, deed/sales records, or another office-approved source.",
+        "",
+    ]
+
+    subject = result.get("subject") or {}
+    if isinstance(subject, dict) and subject:
+        lines.extend(
+            [
+                "Subject Anchor",
+                f"   Situs: {subject.get('situs_address') or ''}",
+                f"   UPC/PIN: {subject.get('upc') or ''} / {subject.get('pin') or ''}",
+                f"   Class/LUC/Style: {subject.get('property_class') or ''} / {subject.get('land_use_code') or ''} {subject.get('land_use_description') or ''} / {subject.get('style') or ''}",
+                f"   Built/Acres: {subject.get('year_built') or ''} / {_fmt_arcgis_number(subject.get('acreage'))}",
+                "",
+            ]
+        )
+
+    if status == "completed":
+        for idx, item in enumerate(result.get("peers") or [], start=1):
+            reasons = "; ".join(item.get("match_reasons") or [])
+            lines.extend(
+                [
+                    f"{idx}. {item.get('situs_address') or 'Unknown situs address'}",
+                    f"   Candidate Score: {item.get('candidate_score')}/100 | Distance: {_fmt_arcgis_number(item.get('distance_miles'))} mi",
+                    f"   UPC/PIN: {item.get('upc') or ''} / {item.get('pin') or ''}",
+                    f"   Class/LUC/Style: {item.get('property_class') or ''} / {item.get('land_use_code') or ''} {item.get('land_use_description') or ''} / {item.get('style') or ''}",
+                    f"   Built/Acres: {item.get('year_built') or ''} / {_fmt_arcgis_number(item.get('acreage'))}",
+                    f"   Reasons: {reasons}",
+                    "   Missing for final comp use: living/building sqft, verified sale date, verified sale price.",
+                    "",
+                ]
+            )
+
+    return "\n".join(lines).strip()
+
+
+def _request_needs_arcgis_candidate_peers(prompt_text: str) -> bool:
+    """True for comp/sold-sale requests where ArcGIS peer candidates can help triage."""
+    text = (prompt_text or "").lower()
+    terms = [
+        "comp", "comps", "comparable", "comparables", "candidate comps",
+        "similar properties", "nearby sales", "nearby sale", "recent sales",
+        "sold properties", "sold property", "sold homes", "sales nearby",
+        "market support", "market value support",
+    ]
+    return _has_any_word_or_phrase(text, terms)
+
+
+def _format_arcgis_candidate_peers_for_homeharvest(result: Dict[str, Any]) -> str:
+    """Compact ArcGIS peer block for the Context Expert/HomeHarvest prompt."""
+    lines = [
+        "PUBLIC ARCGIS CANDIDATE PARCEL PEERS:",
+        "- Source: Bernalillo County Assessor Parcels public ArcGIS layer.",
+        "- Use: Candidate peer/triage support only; these are not final comparable sales.",
+        "- Limitation: Public GIS does not include living/building square footage, verified sale date, or verified sale price.",
+        "- Required next step: use HomeHarvest/public aggregator data and/or iasWorld/CAMA/MLS/deed records to verify living area and sale facts before final comp use.",
+        f"- Peer search status: {result.get('status') or 'unknown'}",
+        f"- Peer search answer: {result.get('answer') or ''}",
+    ]
+
+    if result.get("status") == "completed":
+        lines.extend(
+            [
+                f"- Radius used: {result.get('radius_miles')} mile(s)",
+                f"- Query stage used: {result.get('query_stage') or ''}",
+                f"- Candidate count: {result.get('count') or len(result.get('peers') or [])}",
+            ]
+        )
+        for idx, item in enumerate((result.get("peers") or [])[:10], start=1):
+            reasons = "; ".join(item.get("match_reasons") or [])
+            lines.append(
+                f"  {idx}. {item.get('situs_address') or 'Unknown situs'} | "
+                f"UPC {item.get('upc') or ''} | PIN {item.get('pin') or ''} | "
+                f"Score {item.get('candidate_score')} | Distance {item.get('distance_miles')} mi | "
+                f"Class {item.get('property_class') or ''} | LUC {item.get('land_use_code') or ''} | "
+                f"Style {item.get('style') or ''} | Built {item.get('year_built') or ''} | "
+                f"Acres {item.get('acreage') if item.get('acreage') is not None else ''} | Reasons: {reasons}"
+            )
+    else:
+        subject_lookup = result.get("subject_lookup") or {}
+        if isinstance(subject_lookup, dict) and subject_lookup.get("answer"):
+            lines.append(f"- Subject lookup note: {subject_lookup.get('answer')}")
+
+    lines.extend(
+        [
+            "",
+            "ARCGIS PEER USE RULES FOR HOMEHARVEST:",
+            "- Try the candidate peer addresses as HomeHarvest sold-property searches when the staff request asks for comps/sales.",
+            "- Keep any HomeHarvest subject-property facts separate from ArcGIS subject identity/assessment context.",
+            "- Exclude candidate peer rows that remain missing living sqft, verified sold date, or verified sold price.",
+            "- Never convert ArcGIS assessed/taxable/exemption/list/estimate values into sale prices.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+
 def _extract_arcgis_search_text_from_prompt(prompt_text: str) -> str:
     """
     Pull the best address/UPC search value out of an A.C.E.S/HomeHarvest prompt.
@@ -1357,10 +1830,12 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
         [
             "",
             "GIS + HOMEHARVEST INSTRUCTIONS:",
-            "- Use the GIS parcel as the subject anchor when a single match is present.",
+            "- Use the GIS parcel as the subject identity/geography/assessment anchor when a single match is present.",
+            "- Also search HomeHarvest/public aggregator data for the subject address when available; keep those unofficial subject market/characteristic fields separate from ArcGIS fields.",
             "- For HomeHarvest comps, search around the GIS situs address and prefer residential results consistent with property class, valuation class, land use, year built, style, acreage, tax district, and location when available.",
+            "- If PUBLIC ARCGIS CANDIDATE PARCEL PEERS is present, use those addresses as peer-search leads only; do not treat them as final comps until HomeHarvest/CAMA/MLS/deed data confirms living sqft, sold date, and sold price.",
             "- Never use GIS assessment values, taxable values, exemption amount fields, AVMs, Zestimates, estimates, or list prices as sale prices, comp prices, exemption approvals, or tax/legal determinations.",
-            "- Return the GIS subject context first, then the unofficial HomeHarvest/public-aggregator results.",
+            "- Return the GIS subject context first, then HomeHarvest subject facts if found, then unofficial HomeHarvest/public-aggregator candidate results.",
             "- Clearly label HomeHarvest results as unofficial public-aggregator candidates, not verified sales or final appraisal comps.",
             "- Do not mention an interactive map, file manager, generated file, download, attachment, report, or exported view unless the current tool response includes an actual generated_files item or downloadable link.",
         ]
@@ -1382,13 +1857,18 @@ async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
     try:
         gis_result = await _arcgis_public_parcel_lookup_result(search_text=search_text, max_results=5, return_geometry=False)
         context_block = _format_arcgis_context_for_homeharvest(gis_result, search_text)
+        peer_block = ""
+        if _request_needs_arcgis_candidate_peers(text):
+            peer_result = await _arcgis_public_candidate_peers_result(search_text=search_text, max_results=10)
+            peer_block = _format_arcgis_candidate_peers_for_homeharvest(peer_result)
         _log(
             "ArcGIS pre-check for HomeHarvest",
             status=gis_result.get("status"),
             count=gis_result.get("count"),
             query_mode=gis_result.get("query_mode"),
+            candidate_peers=bool(peer_block),
         )
-        return text + "\n\n" + context_block
+        return text + "\n\n" + context_block + (("\n\n" + peer_block) if peer_block else "")
     except Exception as exc:
         _log("ArcGIS pre-check failed", error=str(exc))
         return (
@@ -1500,7 +1980,9 @@ def _format_arcgis_context_for_report_generation(
                 "HOMEHARVEST REPORT INSTRUCTIONS:",
                 "- Use the enabled HomeHarvest custom action for unofficial public-aggregator market support.",
                 "- Include a HomeHarvest/Public Aggregator Market Support section in both the text answer and any generated report file.",
-                "- Search around the ArcGIS situs/subject anchor when a single ArcGIS match is present.",
+                "- Search HomeHarvest/public aggregator data for the subject address itself when available, then search around the ArcGIS situs/subject anchor when a single ArcGIS match is present.",
+                "- Keep ArcGIS subject identity/assessment context separate from unofficial HomeHarvest subject facts such as sqft, beds, baths, sale/listing fields, or market characteristics.",
+                "- If ArcGIS candidate parcel peers are provided, use those addresses as sold-property search leads only and verify living sqft, sold date, and sold price before final comp use.",
                 "- Prefer residential sales/listings consistent with property class, valuation class, land use, year built, acreage, tax district, and location when available.",
                 "- Label HomeHarvest rows as unofficial public-aggregator data, not verified MLS, iasWorld/CAMA, legal, tax, valuation, exemption, ownership, or sale data.",
                 "- Do not use AVMs, assessed values, taxable values, exemption amounts, estimates, or list/public-aggregator prices as verified sale prices.",
@@ -1559,14 +2041,19 @@ async def _enrich_report_generation_prompt_with_arcgis(
             search_text,
             include_homeharvest=include_homeharvest,
         )
+        peer_block = ""
+        if include_homeharvest and _request_needs_arcgis_candidate_peers(text):
+            peer_result = await _arcgis_public_candidate_peers_result(search_text=search_text, max_results=10)
+            peer_block = _format_arcgis_candidate_peers_for_homeharvest(peer_result)
         _log(
             "ArcGIS pre-check for report generation",
             status=gis_result.get("status"),
             count=gis_result.get("count"),
             query_mode=gis_result.get("query_mode"),
             include_homeharvest=include_homeharvest,
+            candidate_peers=bool(peer_block),
         )
-        return f"{context_block}\n\nSTAFF REQUEST:\n{text}"
+        return f"{context_block}{((chr(10) + chr(10) + peer_block) if peer_block else '')}\n\nSTAFF REQUEST:\n{text}"
     except Exception as exc:
         _log("ArcGIS report-generation pre-check failed", error=str(exc))
         extra = ""
@@ -1608,7 +2095,7 @@ async def health_check(request):
             "status": "healthy",
             "service": "aces-mcp-server",
             "mcp_endpoint": "/mcp",
-            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup", "/arcgis-parcel-map", "/context-expert-file/{token}"],
+            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup", "/arcgis-parcel-map", "/arcgis-candidate-peers", "/context-expert-file/{token}"],
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
             "homeharvest_action_id": HOMEHARVEST_ACTION_ID,
             "arcgis_public_parcel_layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
@@ -1639,6 +2126,7 @@ async def health_check(request):
                 "Check_CustomGPT_Task",
                 "ArcGIS_Public_Parcel_Lookup",
                 "ArcGIS_Public_Parcel_Map",
+                "ArcGIS_Public_Candidate_Peers",
             ],
         }
     )
@@ -1883,6 +2371,59 @@ async def arcgis_parcel_map_route(request):
             "results": gis_result.get("results", []),
         }
     )
+
+
+@mcp.custom_route("/arcgis-candidate-peers", methods=["GET", "POST"])
+async def arcgis_candidate_peers_route(request):
+    """
+    REST wrapper for ArcGIS-only candidate parcel peers.
+
+    These are peer-search leads for comps workflows, not final comparable sales.
+    The output must be enriched with HomeHarvest/CAMA/MLS/deed data before final use.
+
+    POST /arcgis-candidate-peers
+    Headers:
+      x-aces-admin-token: <ACES_ADMIN_TOKEN>
+      Content-Type: application/json
+    Body:
+      {"searchText": "2 Lauren Taylor Ct Tijeras NM", "maxResults": 10}
+    """
+    auth_response = _require_rest_auth(request)
+    if auth_response:
+        return auth_response
+
+    if request.method == "GET":
+        body: Dict[str, Any] = {}
+    else:
+        body = await _request_json_or_empty(request)
+
+    search_text = str(
+        body.get("searchText")
+        or body.get("search_text")
+        or body.get("promptText")
+        or body.get("prompt_text")
+        or request.query_params.get("searchText")
+        or request.query_params.get("search_text")
+        or request.query_params.get("promptText")
+        or ""
+    ).strip()
+
+    max_results_raw = (
+        body.get("maxResults")
+        or body.get("max_results")
+        or request.query_params.get("maxResults")
+        or request.query_params.get("max_results")
+        or 10
+    )
+
+    result = await _arcgis_public_candidate_peers_result(
+        search_text=search_text,
+        max_results=max_results_raw,
+    )
+    result["answer"] = _format_arcgis_candidate_peers_text(result)
+    result["project_id"] = ASSESSMENT_PROJECT_ID
+    return JSONResponse(result)
+
 
 
 @mcp.custom_route("/start-lookup", methods=["POST"])
@@ -2369,13 +2910,16 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "- Do not answer from memory, previous runs, cached examples, or stale conversation context. Run the action for this request.\n"
     "- Prefer operation homeharvestSearchProperties.\n"
     "- Use POST /properties/search.\n"
+    "- For address/comps work, search the subject address itself first, then search sold/listing candidates around the subject.\n"
     "- Return staff-readable numbered cards, not raw JSON.\n"
     "- For report-generation requests, include the HomeHarvest/Public Aggregator Market Support section in the report text and any generated file.\n"
     "- A no-result response is not a tool failure.\n"
     "\n"
     "GIS + HOMEHARVEST RULES:\n"
-    "- If a PUBLIC ARCGIS PARCEL CONTEXT block is present, use it as the subject parcel anchor.\n"
-    "- Return the GIS subject context first, then HomeHarvest/public-aggregator candidate results.\n"
+    "- If a PUBLIC ARCGIS PARCEL CONTEXT block is present, use it as the subject identity/geography/assessment anchor.\n"
+    "- Also run/use HomeHarvest for the subject address when available; keep HomeHarvest subject fields separate and label them unofficial.\n"
+    "- If a PUBLIC ARCGIS CANDIDATE PARCEL PEERS block is present, use those addresses as peer leads for HomeHarvest sold-property enrichment.\n"
+    "- Return the GIS subject context first, HomeHarvest subject facts second if found, then HomeHarvest/public-aggregator candidate results.\n"
     "- Do not treat GIS data as a verified sale, tax status, exemption approval/status, or certified record.\n"
     "- Verify final parcel/account details in iasWorld before relying on them.\n"
     "\n"
@@ -2386,7 +2930,7 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "- Do not return exactly 10 unless 10 usable residential candidates are found.\n"
     "- If fewer than 10 usable residential candidates are found, return only the usable candidates and clearly say how many were found.\n"
     "- Do not pad the list with land, missing-data rows, atypical low-price rows, or poor matches.\n"
-    "- Prefer similar residential properties by property type, living area, beds, baths, lot size, year built, and proximity.\n"
+    "- Prefer similar residential properties by property type, living area, beds, baths, lot size, year built, and proximity; when ArcGIS lacks living area, use ArcGIS only for peer triage and require HomeHarvest/CAMA/MLS enrichment.\n"
     "- Sort by comp similarity first, not newest first.\n"
     "- Label results as unofficial public-aggregator candidate comps, not verified sales.\n"
     "- If the source only returns list/public aggregator prices, say they are not verified sold prices.\n"
@@ -3279,6 +3823,18 @@ async def ArcGIS_Public_Parcel_Map(searchText: str, maxResults: int = 5) -> str:
     """
     result = await _arcgis_public_parcel_lookup_result(searchText, maxResults, return_geometry=False)
     return _format_arcgis_map_routing_text(result)
+
+
+@mcp.tool
+async def ArcGIS_Public_Candidate_Peers(searchText: str, maxResults: int = 10) -> str:
+    """
+    Use for ArcGIS-only candidate parcel peers when staff asks for comp triage
+    but the public GIS layer does not have living square footage or verified
+    sale fields. Returns peer-search leads by public GIS similarity and distance;
+    not final comparable sales and not a replacement for HomeHarvest/CAMA/MLS verification.
+    """
+    result = await _arcgis_public_candidate_peers_result(searchText, maxResults)
+    return _format_arcgis_candidate_peers_text(result)
 
 
 @mcp.tool
