@@ -2611,12 +2611,13 @@ async def check_pending_task_route(request):
 @mcp.custom_route("/agent-call", methods=["POST"])
 async def agent_call_route(request):
     """
-    Optional normalized REST wrapper for the non-lookup A.C.E.S. specialist agents.
+    Optional normalized REST wrapper for A.C.E.S. specialist agents.
 
     Body:
       {"agent":"Community_Educator|Clear_Expectations|Compliance_Expert|Assessment_Context_Expert",
        "promptText":"..."}
 
+    Assessment_Context_Expert and Compliance_Expert use Plan & Act task mode.
     For Assessment_Context_Expert address/comps work, prefer /start-lookup.
     """
     auth_response = _require_rest_auth(request)
@@ -2672,7 +2673,9 @@ async def agent_call_route(request):
 
     project_id, tool_name, action_id, poll_seconds = agent_map[agent]
     try:
-        if tool_name == "Assessment_Context_Expert":
+        plan_act_tools = {"Assessment_Context_Expert", "Compliance_Expert"}
+
+        if tool_name in plan_act_tools:
             raw_result = await _call_customgpt_task(
                 project_id,
                 prompt_text,
@@ -2682,6 +2685,7 @@ async def agent_call_route(request):
             )
         else:
             raw_result = await _call_customgpt_conversation(project_id, prompt_text, tool_name)
+
         return JSONResponse(_normalize_aces_result(raw_result, project_id=project_id))
     except Exception as exc:
         _log("agent_call_route exception", agent=agent, error=str(exc))
@@ -3405,8 +3409,8 @@ async def _call_customgpt_conversation(
     Use the normal CustomGPT conversation API for non-Plan & Act agents.
 
     The /tasks endpoint creates Plan & Act tasks and requires use_planner_mode.
-    Community_Educator, Clear_Expectations, and Compliance_Expert should use
-    conversations unless those projects are explicitly converted to Plan & Act.
+    Community_Educator and Clear_Expectations use conversations.
+    Assessment_Context_Expert and Compliance_Expert use Plan & Act tasks.
     """
     config_error = _require_config(project_id, tool_name)
     if config_error:
@@ -3793,8 +3797,18 @@ async def Compliance_Expert(promptText: str) -> str:
     Use for legal/statutory questions, NMSA, regulations, case law, AG opinions,
     statutory interpretation, protest standards, exemption basis, valuation authority,
     and legal risk. Takes exactly one parameter: promptText.
+
+    Compliance_Expert uses Plan & Act mode, so it submits a CustomGPT task.
+    It may return a Task ID / Project ID when still processing.
     """
-    return await _call_customgpt_conversation(COMPLIANCE_PROJECT_ID, promptText, "Compliance_Expert")
+    _log("Compliance_Expert invoked", poll_seconds=DEFAULT_POLL_SECONDS)
+    return await _call_customgpt_task(
+        COMPLIANCE_PROJECT_ID,
+        promptText,
+        "Compliance_Expert",
+        action_id=None,
+        poll_seconds=DEFAULT_POLL_SECONDS,
+    )
 
 
 @mcp.tool
