@@ -27,10 +27,11 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes eight tools: Community_Educator, Assessment_Context_Expert, "
-        "Clear_Expectations, Compliance_Expert, Check_CustomGPT_Task, "
+        "Exposes nine tools: Community_Educator, Assessment_Context_Expert, "
+        "Clear_Expectations, Compliance_Expert, Smart_Tasks, Check_CustomGPT_Task, "
         "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, and ArcGIS_Public_Candidate_Peers. "
-        "The four CustomGPT specialist tools take exactly one promptText string and return plain text. "
+        "The five CustomGPT specialist tools take exactly one promptText string and return plain text. "
+        "Smart_Tasks submits to CustomGPT project 9262 using Plan & Act task mode for Smart Tasks, code, file, dashboard, and multi-step work. "
         "Check_CustomGPT_Task takes projectId and taskId to retrieve a delayed task result. "
         "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. "
         "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
@@ -47,6 +48,18 @@ COMMUNITY_PROJECT_ID = os.getenv("COMMUNITY_PROJECT_ID", "").strip()
 ASSESSMENT_PROJECT_ID = os.getenv("ASSESSMENT_PROJECT_ID", "94006").strip()
 CLEAR_PROJECT_ID = os.getenv("CLEAR_PROJECT_ID", "").strip()
 COMPLIANCE_PROJECT_ID = os.getenv("COMPLIANCE_PROJECT_ID", "").strip()
+
+# CustomGPT project/agent with Plan & Act + Smart Tasks enabled.
+SMART_TASKS_PROJECT_ID = os.getenv("SMART_TASKS_PROJECT_ID", "9262").strip()
+SMART_TASKS_POLL_SECONDS = int(os.getenv("ACES_SMART_TASKS_POLL_SECONDS", "90"))
+SMART_TASKS_AGENT_CAPABILITY = os.getenv(
+    "ACES_SMART_TASKS_AGENT_CAPABILITY",
+    "complex-tasks",
+).strip() or "complex-tasks"
+SMART_TASKS_RESPONSE_SOURCE = os.getenv(
+    "ACES_SMART_TASKS_RESPONSE_SOURCE",
+    "default",
+).strip() or "default"
 
 # HomeHarvest External API action ID inside CustomGPT project 94006.
 HOMEHARVEST_ACTION_ID = os.getenv("HOMEHARVEST_ACTION_ID", "7").strip()
@@ -2093,8 +2106,21 @@ async def health_check(request):
             "status": "healthy",
             "service": "aces-mcp-server",
             "mcp_endpoint": "/mcp",
-            "rest_routes": ["/start-lookup", "/check-pending-task", "/agent-call", "/arcgis-parcel-lookup", "/arcgis-parcel-map", "/arcgis-candidate-peers", "/context-expert-file/{token}"],
+            "rest_routes": [
+                "/start-lookup",
+                "/check-pending-task",
+                "/agent-call",
+                "/smart-task",
+                "/arcgis-parcel-lookup",
+                "/arcgis-parcel-map",
+                "/arcgis-candidate-peers",
+                "/context-expert-file/{token}",
+            ],
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
+            "smart_tasks_project_id": SMART_TASKS_PROJECT_ID,
+            "smart_tasks_poll_seconds": SMART_TASKS_POLL_SECONDS,
+            "smart_tasks_agent_capability": SMART_TASKS_AGENT_CAPABILITY,
+            "smart_tasks_response_source": SMART_TASKS_RESPONSE_SOURCE,
             "homeharvest_action_id": HOMEHARVEST_ACTION_ID,
             "arcgis_public_parcel_layer_url": ARCGIS_PUBLIC_PARCEL_LAYER_URL,
             "enrich_homeharvest_with_arcgis": ENRICH_HOMEHARVEST_WITH_ARCGIS,
@@ -2121,6 +2147,7 @@ async def health_check(request):
                 "Assessment_Context_Expert",
                 "Clear_Expectations",
                 "Compliance_Expert",
+                "Smart_Tasks",
                 "Check_CustomGPT_Task",
                 "ArcGIS_Public_Parcel_Lookup",
                 "ArcGIS_Public_Parcel_Map",
@@ -2608,17 +2635,83 @@ async def check_pending_task_route(request):
         )
 
 
+@mcp.custom_route("/smart-task", methods=["POST"])
+async def smart_task_route(request):
+    """
+    Normalized REST wrapper for CustomGPT project 9262 Smart Tasks.
+
+    POST /smart-task
+    Headers:
+      x-aces-admin-token: <ACES_ADMIN_TOKEN>
+      Content-Type: application/json
+    Body:
+      {"promptText": "Analyze this data and create a downloadable report."}
+    Optional:
+      {"project_id": "9262"}
+
+    Returns:
+      {"status":"completed|still_processing|failed|task_not_found",
+       "answer":"...",
+       "task_id":"...",
+       "project_id":"9262"}
+    """
+    auth_response = _require_rest_auth(request)
+    if auth_response:
+        return auth_response
+
+    body = await _request_json_or_empty(request)
+    prompt_text = str(body.get("promptText") or body.get("prompt_text") or "").strip()
+    project_id = str(
+        body.get("project_id")
+        or body.get("projectId")
+        or SMART_TASKS_PROJECT_ID
+    ).strip()
+
+    if not prompt_text:
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": "Missing promptText.",
+                "task_id": "",
+                "project_id": project_id,
+            }
+        )
+
+    try:
+        raw_result = await _call_customgpt_task(
+            project_id,
+            prompt_text,
+            "Smart_Tasks",
+            action_id=None,
+            poll_seconds=SMART_TASKS_POLL_SECONDS,
+            agent_capability=SMART_TASKS_AGENT_CAPABILITY,
+            response_source=SMART_TASKS_RESPONSE_SOURCE,
+        )
+        return JSONResponse(_normalize_aces_result(raw_result, project_id=project_id))
+    except Exception as exc:
+        _log("smart_task_route exception", project_id=project_id, error=str(exc))
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": f"Smart_Tasks did not return usable results. Error: {exc}",
+                "task_id": "",
+                "project_id": project_id,
+            }
+        )
+
+
 @mcp.custom_route("/agent-call", methods=["POST"])
 async def agent_call_route(request):
     """
     Optional normalized REST wrapper for A.C.E.S. specialist agents.
 
     Body:
-      {"agent":"Community_Educator|Clear_Expectations|Compliance_Expert|Assessment_Context_Expert",
+      {"agent":"Community_Educator|Clear_Expectations|Compliance_Expert|Assessment_Context_Expert|Smart_Tasks",
        "promptText":"..."}
 
-    Assessment_Context_Expert and Compliance_Expert use Plan & Act task mode.
+    Assessment_Context_Expert, Compliance_Expert, and Smart_Tasks use Plan & Act task mode.
     For Assessment_Context_Expert address/comps work, prefer /start-lookup.
+    For project 9262 Smart Tasks work, prefer /smart-task.
     """
     auth_response = _require_rest_auth(request)
     if auth_response:
@@ -2653,6 +2746,7 @@ async def agent_call_route(request):
         "Community_Educator": (COMMUNITY_PROJECT_ID, "Community_Educator", None, DEFAULT_POLL_SECONDS),
         "Clear_Expectations": (CLEAR_PROJECT_ID, "Clear_Expectations", None, DEFAULT_POLL_SECONDS),
         "Compliance_Expert": (COMPLIANCE_PROJECT_ID, "Compliance_Expert", None, DEFAULT_POLL_SECONDS),
+        "Smart_Tasks": (SMART_TASKS_PROJECT_ID, "Smart_Tasks", None, SMART_TASKS_POLL_SECONDS),
         "Assessment_Context_Expert": (
             ASSESSMENT_PROJECT_ID,
             "Assessment_Context_Expert",
@@ -2665,7 +2759,7 @@ async def agent_call_route(request):
         return JSONResponse(
             {
                 "status": "failed",
-                "answer": "Invalid agent. Use Community_Educator, Assessment_Context_Expert, Clear_Expectations, Compliance_Expert, ArcGIS_Public_Parcel_Lookup, or ArcGIS_Public_Parcel_Map.",
+                "answer": "Invalid agent. Use Community_Educator, Assessment_Context_Expert, Clear_Expectations, Compliance_Expert, Smart_Tasks, ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, or ArcGIS_Public_Candidate_Peers.",
                 "task_id": "",
                 "project_id": "",
             }
@@ -2673,7 +2767,7 @@ async def agent_call_route(request):
 
     project_id, tool_name, action_id, poll_seconds = agent_map[agent]
     try:
-        plan_act_tools = {"Assessment_Context_Expert", "Compliance_Expert"}
+        plan_act_tools = {"Assessment_Context_Expert", "Compliance_Expert", "Smart_Tasks"}
 
         if tool_name in plan_act_tools:
             raw_result = await _call_customgpt_task(
@@ -2682,6 +2776,8 @@ async def agent_call_route(request):
                 tool_name,
                 action_id=action_id,
                 poll_seconds=poll_seconds,
+                agent_capability=SMART_TASKS_AGENT_CAPABILITY if tool_name == "Smart_Tasks" else None,
+                response_source=SMART_TASKS_RESPONSE_SOURCE if tool_name == "Smart_Tasks" else "openai_content",
             )
         else:
             raw_result = await _call_customgpt_conversation(project_id, prompt_text, tool_name)
@@ -3506,7 +3602,10 @@ def _is_homeharvest_lookup(tool_name: str, prompt_text: str, action_id: Optional
 
 
 def _is_fresh_assessment_task(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
-    """HomeHarvest and report/file generation should not reuse completed cached answers."""
+    """Run-specific tasks should not reuse completed cached answers."""
+    if tool_name == "Smart_Tasks":
+        return True
+
     return tool_name == "Assessment_Context_Expert" and (
         _is_homeharvest_lookup(tool_name, prompt_text, action_id)
         or _request_needs_report_generation(prompt_text)
@@ -3520,6 +3619,9 @@ def _should_reuse_prompt_cache(tool_name: str, prompt_text: str, action_id: Opti
     Important: this controls only the initial tool call. Task IDs can still be
     checked through Check_CustomGPT_Task, and every submitted task is still saved.
     """
+    if tool_name == "Smart_Tasks":
+        return False
+
     if not _is_fresh_assessment_task(tool_name, prompt_text, action_id):
         return True
 
@@ -3551,6 +3653,8 @@ async def _call_customgpt_task(
     tool_name: str,
     action_id: Optional[str] = None,
     poll_seconds: int = DEFAULT_POLL_SECONDS,
+    agent_capability: Optional[str] = None,
+    response_source: str = "openai_content",
 ) -> str:
     config_error = _require_config(project_id, tool_name)
     if config_error:
@@ -3615,11 +3719,14 @@ async def _call_customgpt_task(
 
     _log("SUBMITTING NEW CUSTOMGPT TASK", tool=tool_name, project=project_id, task_name=task_name)
 
+    capability = (agent_capability or "optimal-choice").strip()
+    selected_response_source = (response_source or "openai_content").strip()
+
     multipart: Dict[str, Any] = {
         "name": (None, task_name),
         "prompt": (None, prompt_text),
-        "response_source": (None, "openai_content"),
-        "agent_capability": (None, "optimal-choice"),
+        "response_source": (None, selected_response_source),
+        "agent_capability": (None, capability),
     }
     if action_id:
         multipart["action_overrides"] = (None, json.dumps({"enabled": [str(action_id)], "disabled": []}))
@@ -3808,6 +3915,34 @@ async def Compliance_Expert(promptText: str) -> str:
         "Compliance_Expert",
         action_id=None,
         poll_seconds=DEFAULT_POLL_SECONDS,
+    )
+
+
+@mcp.tool
+async def Smart_Tasks(promptText: str) -> str:
+    """
+    Use for CustomGPT project 9262 Smart Tasks / Plan & Act work:
+    reading files, creating files, code execution, data analysis, dashboards,
+    exports, calculations, and multi-step work that requires Smart Tasks.
+
+    Takes exactly one parameter: promptText.
+    May return Task ID / Project ID if still processing.
+    """
+    _log(
+        "Smart_Tasks invoked",
+        project_id=SMART_TASKS_PROJECT_ID,
+        poll_seconds=SMART_TASKS_POLL_SECONDS,
+        agent_capability=SMART_TASKS_AGENT_CAPABILITY,
+        response_source=SMART_TASKS_RESPONSE_SOURCE,
+    )
+    return await _call_customgpt_task(
+        SMART_TASKS_PROJECT_ID,
+        promptText,
+        "Smart_Tasks",
+        action_id=None,
+        poll_seconds=SMART_TASKS_POLL_SECONDS,
+        agent_capability=SMART_TASKS_AGENT_CAPABILITY,
+        response_source=SMART_TASKS_RESPONSE_SOURCE,
     )
 
 
