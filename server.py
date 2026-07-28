@@ -31,6 +31,7 @@ mcp = FastMCP(
         "Clear_Expectations, Compliance_Expert, Smart_Tasks, Check_CustomGPT_Task, "
         "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, and ArcGIS_Public_Candidate_Peers. "
         "The five CustomGPT specialist tools take exactly one promptText string and return plain text. "
+        "Community_Educator uses CustomGPT Plan & Act task mode because project 9262 has Plan & Act enabled. "
         "Smart_Tasks submits to CustomGPT project 9262 using Plan & Act task mode for Smart Tasks, code, file, dashboard, and multi-step work. "
         "Check_CustomGPT_Task takes projectId and taskId to retrieve a delayed task result. "
         "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. "
@@ -2709,7 +2710,7 @@ async def agent_call_route(request):
       {"agent":"Community_Educator|Clear_Expectations|Compliance_Expert|Assessment_Context_Expert|Smart_Tasks",
        "promptText":"..."}
 
-    Assessment_Context_Expert, Compliance_Expert, and Smart_Tasks use Plan & Act task mode.
+    Community_Educator, Assessment_Context_Expert, Compliance_Expert, and Smart_Tasks use Plan & Act task mode.
     For Assessment_Context_Expert address/comps work, prefer /start-lookup.
     For project 9262 Smart Tasks work, prefer /smart-task.
     """
@@ -2767,7 +2768,7 @@ async def agent_call_route(request):
 
     project_id, tool_name, action_id, poll_seconds = agent_map[agent]
     try:
-        plan_act_tools = {"Assessment_Context_Expert", "Compliance_Expert", "Smart_Tasks"}
+        plan_act_tools = {"Community_Educator", "Assessment_Context_Expert", "Compliance_Expert", "Smart_Tasks"}
 
         if tool_name in plan_act_tools:
             raw_result = await _call_customgpt_task(
@@ -3505,8 +3506,8 @@ async def _call_customgpt_conversation(
     Use the normal CustomGPT conversation API for non-Plan & Act agents.
 
     The /tasks endpoint creates Plan & Act tasks and requires use_planner_mode.
-    Community_Educator and Clear_Expectations use conversations.
-    Assessment_Context_Expert and Compliance_Expert use Plan & Act tasks.
+    Clear_Expectations uses conversations.
+    Community_Educator, Assessment_Context_Expert, and Compliance_Expert use Plan & Act tasks.
     """
     config_error = _require_config(project_id, tool_name)
     if config_error:
@@ -3865,7 +3866,14 @@ async def Community_Educator(promptText: str) -> str:
     protests, forms, deadlines, outreach, value freeze, and owner-facing explanations.
     Takes exactly one parameter: promptText.
     """
-    return await _call_customgpt_conversation(COMMUNITY_PROJECT_ID, promptText, "Community_Educator")
+    _log("Community_Educator invoked", poll_seconds=DEFAULT_POLL_SECONDS)
+    return await _call_customgpt_task(
+        COMMUNITY_PROJECT_ID,
+        promptText,
+        "Community_Educator",
+        action_id=None,
+        poll_seconds=DEFAULT_POLL_SECONDS,
+    )
 
 
 @mcp.tool
