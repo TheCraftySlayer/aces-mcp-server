@@ -550,7 +550,8 @@ def _admin_authorized(request) -> bool:
     if not ACES_ADMIN_TOKEN:
         return False
     supplied_token = request.headers.get("x-aces-admin-token", "") or request.query_params.get("token", "")
-    return supplied_token == ACES_ADMIN_TOKEN
+    # Constant-time comparison so response timing doesn't leak the token.
+    return secrets.compare_digest(str(supplied_token).encode(), ACES_ADMIN_TOKEN.encode())
 
 
 
@@ -2707,8 +2708,12 @@ async def agent_call_route(request):
     Optional normalized REST wrapper for A.C.E.S. specialist agents.
 
     Body:
-      {"agent":"Community_Educator|Clear_Expectations|Compliance_Expert|Assessment_Context_Expert|Smart_Tasks",
+      {"agent":"Community_Educator|Clear_Expectations|Compliance_Expert|Assessment_Context_Expert|Smart_Tasks|
+                ArcGIS_Public_Parcel_Lookup|ArcGIS_Public_Parcel_Map|ArcGIS_Public_Candidate_Peers",
        "promptText":"..."}
+
+    ArcGIS agents return status completed|failed plus arcgis_status with the raw
+    ArcGIS result (completed, empty, needs_subject_selection, failed).
 
     Community_Educator, Assessment_Context_Expert, Compliance_Expert, and Smart_Tasks use Plan & Act task mode.
     For Assessment_Context_Expert address/comps work, prefer /start-lookup.
@@ -2725,21 +2730,55 @@ async def agent_call_route(request):
     if not prompt_text:
         return JSONResponse({"status": "failed", "answer": "Missing promptText.", "task_id": "", "project_id": ""})
 
-    if agent in {"ArcGIS_Public_Parcel_Lookup", "ArcGIS_Public_Parcel", "ArcGIS", "ArcGIS_Parcel_Lookup"}:
-        result = await _arcgis_public_parcel_lookup_result(prompt_text)
-        return JSONResponse(result)
+    arcgis_lookup_names = {"ArcGIS_Public_Parcel_Lookup", "ArcGIS_Public_Parcel", "ArcGIS", "ArcGIS_Parcel_Lookup"}
+    arcgis_map_names = {"ArcGIS_Public_Parcel_Map", "ArcGIS_Parcel_Map", "ArcGIS_Map", "Parcel_Map"}
+    arcgis_peer_names = {"ArcGIS_Public_Candidate_Peers", "ArcGIS_Candidate_Peers", "Candidate_Peers"}
 
-    if agent in {"ArcGIS_Public_Parcel_Map", "ArcGIS_Parcel_Map", "ArcGIS_Map", "Parcel_Map"}:
-        result = await _arcgis_public_parcel_lookup_result(prompt_text, max_results=5, return_geometry=False)
-        answer = _format_arcgis_map_routing_text(result)
+    if agent in arcgis_lookup_names | arcgis_map_names | arcgis_peer_names:
+        # Pull the address/UPC out of a sentence, same as /start-lookup.
+        search_text = _extract_arcgis_search_text_from_prompt(prompt_text) or prompt_text
+
+        try:
+            if agent in arcgis_peer_names:
+                max_results = body.get("maxResults") or body.get("max_results") or 10
+                result = await _arcgis_public_candidate_peers_result(search_text, max_results=max_results)
+                answer = _format_arcgis_candidate_peers_text(result)
+                extra = {"subject": result.get("subject"), "peers": result.get("peers", [])}
+            else:
+                is_map = agent in arcgis_map_names
+                result = await _arcgis_public_parcel_lookup_result(
+                    search_text,
+                    max_results=5 if is_map else ARCGIS_PUBLIC_PARCEL_MAX_RESULTS,
+                    return_geometry=False,
+                )
+                answer = _format_arcgis_map_routing_text(result) if is_map else _format_arcgis_parcel_lookup_text(result)
+                extra = {"results": result.get("results", [])}
+        except Exception as exc:
+            _log("agent_call_route arcgis exception", agent=agent, error=str(exc))
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "answer": f"{agent} did not return usable results. Error: {exc}",
+                    "task_id": "",
+                    "project_id": ASSESSMENT_PROJECT_ID,
+                }
+            )
+
+        # Map ArcGIS statuses onto the Power Automate contract.
+        # empty and needs_subject_selection are answered lookups, not failures;
+        # the answer text explains them. The raw status stays in arcgis_status.
+        raw_status = str(result.get("status") or "")
+        status = "failed" if raw_status == "failed" else "completed"
+
         return JSONResponse(
             {
-                "status": "completed" if result.get("status") in {"completed", "empty"} else "failed",
+                "status": status,
                 "answer": answer,
                 "task_id": "",
                 "project_id": ASSESSMENT_PROJECT_ID,
                 "source": result.get("source", "Bernalillo County Assessor Parcels public ArcGIS layer"),
-                "results": result.get("results", []),
+                "arcgis_status": raw_status,
+                **extra,
             }
         )
 
