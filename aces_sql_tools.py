@@ -21,6 +21,7 @@ Settings (environment variables)
   ACES_SQL_PASSWORD        client secret, or the SQL user password
   ACES_SQL_DRIVER          default "ODBC Driver 18 for SQL Server"
   ACES_SQL_TIMEOUT_SECONDS default 30
+  ACES_SQL_RETRY_ATTEMPTS  default 3 (connection drops and timeouts only)
 
 Requires: pip install pyodbc, plus Microsoft ODBC Driver 18 for SQL Server.
 """
@@ -28,6 +29,7 @@ Requires: pip install pyodbc, plus Microsoft ODBC Driver 18 for SQL Server.
 import asyncio
 import os
 import re
+import time
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -47,6 +49,7 @@ SQL_USER = os.getenv("ACES_SQL_USER", "").strip()
 SQL_PASSWORD = os.getenv("ACES_SQL_PASSWORD", "").strip()
 SQL_DRIVER = os.getenv("ACES_SQL_DRIVER", "ODBC Driver 18 for SQL Server").strip()
 SQL_TIMEOUT_SECONDS = int(os.getenv("ACES_SQL_TIMEOUT_SECONDS", "30"))
+SQL_RETRY_ATTEMPTS = max(1, int(os.getenv("ACES_SQL_RETRY_ATTEMPTS", "3")))
 MAX_ROWS = 200
 
 TOOL_NAMES = [
@@ -139,6 +142,27 @@ def _run_proc_sync(proc: str, params: List[Tuple[str, Any]]) -> Tuple[List[str],
         conn.close()
 
 
+def _run_proc_with_retry(proc: str, params: List[Tuple[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
+    """
+    Run a procedure, retrying only on connection drops and timeouts.
+
+    pyodbc pools connections, so a call after Azure's idle timeout can pick up a
+    dead pooled connection. Those surface as OperationalError and are retried
+    with a short backoff. Login failures (wrong secret) and SQL errors raised by
+    the procedure are different error classes and fail immediately.
+    """
+    import pyodbc
+
+    for attempt in range(SQL_RETRY_ATTEMPTS):
+        try:
+            return _run_proc_sync(proc, params)
+        except pyodbc.OperationalError:
+            if attempt == SQL_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(2 ** attempt)
+    raise RuntimeError("unreachable")
+
+
 def _clean_sql_error(exc: Exception) -> str:
     """Pull the readable message out of a pyodbc error (e.g. a THROW 50001 message)."""
     text = str(exc)
@@ -228,7 +252,7 @@ def register_sql_tools(
 
     async def _call(tool: str, proc: str, params: List[Tuple[str, Any]], title: str, note: str) -> str:
         try:
-            columns, rows = await asyncio.to_thread(_run_proc_sync, proc, params)
+            columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
         except ImportError:
             log("SQL data tool failed - pyodbc not installed", tool=tool)
             return f"{_ERROR_PREFIX} the server is missing the pyodbc package."
@@ -329,7 +353,7 @@ def register_sql_tools(
         except ValueError as exc:
             return _bad_input(exc)
         if len(search) < 4:
-            return _bad_input("address must be at least 4 characters.")
+            return _bad_input(ValueError("address must be at least 4 characters."))
         return await _call(
             "ACES_NOV_Search", "ai_api.nov_search",
             [("address", search), ("tax_year", year)],
@@ -421,5 +445,12 @@ def register_sql_tools(
         })
 
     REGISTERED = True
-    log("SQL data tools registered", server=SQL_SERVER, database=SQL_DATABASE, auth=SQL_AUTH, tools=len(tools))
+    log(
+        "SQL data tools registered",
+        server=SQL_SERVER,
+        database=SQL_DATABASE,
+        auth=SQL_AUTH,
+        tools=len(tools),
+        retry_attempts=SQL_RETRY_ATTEMPTS,
+    )
     return True
