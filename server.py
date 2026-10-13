@@ -2138,6 +2138,7 @@ async def health_check(request):
             "task_cache_file": TASK_CACHE_FILE,
             "task_cache_count": len(TASK_CACHE),
             "task_cache_debug_enabled": bool(ACES_ADMIN_TOKEN),
+            "mcp_api_key_configured": bool(ACES_MCP_API_KEY),
             "default_poll_seconds": DEFAULT_POLL_SECONDS,
             "homeharvest_poll_seconds": HOMEHARVEST_POLL_SECONDS,
             "report_generation_poll_seconds": REPORT_GENERATION_POLL_SECONDS,
