@@ -6,7 +6,6 @@ import hashlib
 import time
 import secrets
 from datetime import datetime, timezone
-from starlette.middleware import Middleware
 from urllib.parse import quote_plus
 from typing import Optional, Any, Dict, List, Tuple
 
@@ -21,9 +20,20 @@ os.environ.setdefault("FASTMCP_JSON_RESPONSE", "true")
 
 import httpx
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 import aces_sql_tools
+
+
+# Describe the SQL data tools to the model only when they will actually register.
+_SQL_TOOLS_NOTE = (
+    " Also exposes seven read-only ACES data tools (ACES_Office_Volume, ACES_Forecast, "
+    "ACES_Forecast_Accuracy, ACES_NOV_Parcel, ACES_NOV_Search, ACES_NOV_Coverage, ACES_Deed_Volume) "
+    "that query the ACES database through fixed stored procedures."
+    if aces_sql_tools.SQL_TOOLS_ENABLED and not aces_sql_tools._config_problem()
+    else ""
+)
 
 
 mcp = FastMCP(
@@ -41,7 +51,7 @@ mcp = FastMCP(
         "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
         "ArcGIS_Public_Candidate_Peers returns ArcGIS-only candidate parcel peers for comp triage when living area/sale data is unavailable in GIS. "
         "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
-    ),
+    ) + _SQL_TOOLS_NOTE,
 )
 
 
@@ -102,7 +112,8 @@ ENRICH_HOMEHARVEST_WITH_ARCGIS = os.getenv(
     "ACES_ENRICH_HOMEHARVEST_WITH_ARCGIS", "true"
 ).strip().lower() not in {"0", "false", "no", "off"}
 
-# Optional admin token for viewing /task-cache and /check-task.
+# Admin token for the REST wrapper routes and /task-cache, /check-task.
+# Accepted only in the x-aces-admin-token header (never the URL, which ends up in access logs).
 ACES_ADMIN_TOKEN = os.getenv("ACES_ADMIN_TOKEN", "").strip()
 
 # API key required on /mcp. Separate from ACES_ADMIN_TOKEN so the Copilot
@@ -203,6 +214,17 @@ def _log(message: str, **kwargs: Any) -> None:
     """Small structured-ish logger for Render stdout."""
     details = " ".join(f"{key}={value}" for key, value in kwargs.items() if value is not None)
     print(f"[aces] {message}" + (f" {details}" if details else ""), flush=True)
+
+
+def _error_preview(status_code: int, payload: Any, max_len: int = 1200) -> Optional[str]:
+    """
+    Response bodies are logged only on errors. Successful CustomGPT responses echo
+    staff prompts and answers, which can contain taxpayer details, so they stay
+    out of the host's logs. _log() skips None values.
+    """
+    if status_code >= 400:
+        return _safe_json_dumps(payload, max_len)
+    return None
 
 
 def _trim_cached_answer(answer: Optional[str]) -> Optional[str]:
@@ -556,7 +578,8 @@ def _update_task_cache_by_task_id(
 def _admin_authorized(request) -> bool:
     if not ACES_ADMIN_TOKEN:
         return False
-    supplied_token = request.headers.get("x-aces-admin-token", "") or request.query_params.get("token", "")
+    # Header only. A ?token= query parameter would be written into access logs.
+    supplied_token = request.headers.get("x-aces-admin-token", "")
     # Constant-time comparison so response timing doesn't leak the token.
     return secrets.compare_digest(str(supplied_token).encode(), ACES_ADMIN_TOKEN.encode())
 
@@ -681,7 +704,7 @@ async def _request_json_or_empty(request) -> Dict[str, Any]:
         return {}
 
 
-def _json_unauthorized(message: str = "Unauthorized. Supply x-aces-admin-token header or ?token=...") -> JSONResponse:
+def _json_unauthorized(message: str = "Unauthorized. Supply the x-aces-admin-token header.") -> JSONResponse:
     return JSONResponse(
         {
             "status": "failed",
@@ -2174,7 +2197,7 @@ async def task_cache_debug(request):
     if not ACES_ADMIN_TOKEN:
         return JSONResponse({"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403)
     if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply x-aces-admin-token header or ?token=..."}, status_code=401)
+        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
     return JSONResponse({"count": len(TASK_CACHE), "tasks": TASK_CACHE})
 
 
@@ -2184,7 +2207,7 @@ async def task_cache_clear(request):
     if not ACES_ADMIN_TOKEN:
         return JSONResponse({"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403)
     if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply x-aces-admin-token header or ?token=..."}, status_code=401)
+        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
 
     count = len(TASK_CACHE)
     TASK_CACHE.clear()
@@ -2272,7 +2295,7 @@ async def check_task_route(request):
     if not ACES_ADMIN_TOKEN:
         return JSONResponse({"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403)
     if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply x-aces-admin-token header or ?token=..."}, status_code=401)
+        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
 
     project_id = str(request.query_params.get("project_id") or ASSESSMENT_PROJECT_ID).strip()
     task_id = str(request.query_params.get("task_id") or "").strip()
@@ -2295,7 +2318,7 @@ async def arcgis_parcel_lookup_route(request):
     Body:
       {"searchText": "2 Lauren Taylor Ct Tijeras NM", "maxResults": 10}
 
-    Also supports GET:
+    Also supports GET (token still goes in the header):
       /arcgis-parcel-lookup?searchText=2%20Lauren%20Taylor%20Ct%20Tijeras%20NM&maxResults=10
     """
     auth_response = _require_rest_auth(request)
@@ -2356,7 +2379,7 @@ async def arcgis_parcel_map_route(request):
     Body:
       {"searchText": "2 Lauren Taylor Ct Tijeras NM", "maxResults": 5}
 
-    Also supports GET:
+    Also supports GET (token still goes in the header):
       /arcgis-parcel-map?searchText=2%20Lauren%20Taylor%20Ct%20Tijeras%20NM&maxResults=5
     """
     auth_response = _require_rest_auth(request)
@@ -2594,7 +2617,7 @@ async def check_pending_task_route(request):
     Body:
       {"task_id":"...", "project_id":"94006"}
 
-    Also supports GET:
+    Also supports GET (token still goes in the header):
       /check-pending-task?project_id=94006&task_id=...
     """
     auth_response = _require_rest_auth(request)
@@ -3587,7 +3610,7 @@ async def _call_customgpt_conversation(
             tool=tool_name,
             project=project_id,
             http_status=create.status_code,
-            response_preview=_safe_json_dumps(create_data, 1200),
+            response_preview=_error_preview(create.status_code, create_data),
         )
 
         if create.status_code >= 400:
@@ -3623,7 +3646,7 @@ async def _call_customgpt_conversation(
             project=project_id,
             session_id=session_id,
             http_status=message.status_code,
-            response_preview=_safe_json_dumps(message_data, 1200),
+            response_preview=_error_preview(message.status_code, message_data),
         )
 
         if message.status_code >= 400:
@@ -3732,7 +3755,15 @@ async def _call_customgpt_task(
         prompt_text = await _enrich_homeharvest_prompt_with_arcgis(prompt_text)
         prompt_text = _enrich_homeharvest_prompt(prompt_text)
 
-    _log("specialist tool received prompt", tool=tool_name, project=project_id, action_id=action_id or "", prompt_preview=_safe_json_dumps(prompt_text[:800], 900))
+    # Log size and hash only. Staff prompts can contain taxpayer details.
+    _log(
+        "specialist tool received prompt",
+        tool=tool_name,
+        project=project_id,
+        action_id=action_id or "",
+        prompt_chars=len(prompt_text),
+        prompt_hash=_stable_hash(prompt_text),
+    )
 
     should_reuse_prompt_cache = _should_reuse_prompt_cache(tool_name, prompt_text, action_id)
 
@@ -3786,7 +3817,13 @@ async def _call_customgpt_task(
     async with httpx.AsyncClient(timeout=timeout) as client:
         submit = await client.post(f"{CUSTOMGPT_BASE}/projects/{project_id}/tasks", headers=headers, files=multipart)
         submit_data = await _read_json_or_text(submit)
-        _log("CustomGPT submit response", tool=tool_name, project=project_id, http_status=submit.status_code, response_preview=_safe_json_dumps(submit_data, 1200))
+        _log(
+            "CustomGPT submit response",
+            tool=tool_name,
+            project=project_id,
+            http_status=submit.status_code,
+            response_preview=_error_preview(submit.status_code, submit_data),
+        )
 
         if submit.status_code >= 400:
             return f"{tool_name} task submit failed.\nHTTP status: {submit.status_code}\nResponse: {_safe_json_dumps(submit_data)}"
@@ -4078,7 +4115,8 @@ class McpApiKeyMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or not scope.get("path", "").startswith("/mcp"):
+        path = scope.get("path", "")
+        if scope.get("type") != "http" or not (path == "/mcp" or path.startswith("/mcp/")):
             await self.app(scope, receive, send)
             return
 
@@ -4095,7 +4133,7 @@ class McpApiKeyMiddleware:
                 supplied = auth[7:].strip()
 
         if not supplied or not secrets.compare_digest(supplied.encode(), ACES_MCP_API_KEY.encode()):
-            _log("MCP request rejected - missing or wrong API key", path=scope.get("path"))
+            _log("MCP request rejected - missing or wrong API key", path=path)
             response = JSONResponse({"error": "Unauthorized."}, status_code=401)
             await response(scope, receive, send)
             return
