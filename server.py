@@ -6,6 +6,7 @@ import hashlib
 import time
 import secrets
 from datetime import datetime, timezone
+from starlette.middleware import Middleware
 from urllib.parse import quote_plus
 from typing import Optional, Any, Dict, List, Tuple
 
@@ -103,6 +104,10 @@ ENRICH_HOMEHARVEST_WITH_ARCGIS = os.getenv(
 
 # Optional admin token for viewing /task-cache and /check-task.
 ACES_ADMIN_TOKEN = os.getenv("ACES_ADMIN_TOKEN", "").strip()
+
+# API key required on /mcp. Separate from ACES_ADMIN_TOKEN so the Copilot
+# connector key can't open the admin/REST routes, and each can rotate alone.
+ACES_MCP_API_KEY = os.getenv("ACES_MCP_API_KEY", "").strip()
 
 CUSTOMGPT_BASE = os.getenv("CUSTOMGPT_BASE", "https://app.customgpt.ai/api/v1").rstrip("/")
 
@@ -4054,6 +4059,57 @@ aces_sql_tools.register_sql_tools(
 )
 
 
+# ---------------------------------------------------------------------------
+# /mcp API key (stopgap until Entra OAuth on the County AI Lab server)
+# ---------------------------------------------------------------------------
+
+class McpApiKeyMiddleware:
+    """
+    Require an API key on /mcp only. Other routes are unaffected: / and /health
+    stay open for Render health checks, REST routes keep their own admin token,
+    and /context-expert-file links stay unguessable-token links for staff.
+
+    Fails closed: if ACES_MCP_API_KEY is not set, every /mcp request gets 503.
+    Accepts "x-aces-mcp-key: <key>" or "Authorization: Bearer <key>".
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not scope.get("path", "").startswith("/mcp"):
+            await self.app(scope, receive, send)
+            return
+
+        if not ACES_MCP_API_KEY:
+            response = JSONResponse({"error": "MCP endpoint is not configured. Set ACES_MCP_API_KEY."}, status_code=503)
+            await response(scope, receive, send)
+            return
+
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        supplied = headers.get("x-aces-mcp-key", "").strip()
+        if not supplied:
+            auth = headers.get("authorization", "").strip()
+            if auth.lower().startswith("bearer "):
+                supplied = auth[7:].strip()
+
+        if not supplied or not secrets.compare_digest(supplied.encode(), ACES_MCP_API_KEY.encode()):
+            _log("MCP request rejected - missing or wrong API key", path=scope.get("path"))
+            response = JSONResponse({"error": "Unauthorized."}, status_code=401)
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
+# Module-level app so "uvicorn server:app" works as well as "python server.py".
+app = mcp.http_app(middleware=[Middleware(McpApiKeyMiddleware)])
+
+
 if __name__ == "__main__":
+    import uvicorn
+
+    if not ACES_MCP_API_KEY:
+        _log("WARNING: ACES_MCP_API_KEY is not set - /mcp will refuse all requests")
     port = int(os.getenv("PORT", "10000"))
-    mcp.run(transport="http", host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
