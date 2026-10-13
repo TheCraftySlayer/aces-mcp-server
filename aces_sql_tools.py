@@ -34,6 +34,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from fastmcp.exceptions import ToolError
 from starlette.responses import JSONResponse
 
 
@@ -164,8 +165,14 @@ def _run_proc_with_retry(proc: str, params: List[Tuple[str, Any]]) -> Tuple[List
 
 
 def _clean_sql_error(exc: Exception) -> str:
-    """Pull the readable message out of a pyodbc error (e.g. a THROW 50001 message)."""
+    """Readable message for the caller; full detail stays in the server log."""
     text = str(exc)
+    if "Can't open lib" in text or "Data source name not found" in text:
+        return "The database driver is not installed on this server."
+    if "Login timeout" in text or "TCP Provider" in text or "Cannot open server" in text:
+        return "The database server could not be reached."
+    if "Login failed" in text or "AADSTS" in text:
+        return "Database sign-in failed."
     match = re.search(r"\[SQL Server\]([^\[]+?)(?:\s*\(\d+\)\s*\(SQL\w+\))", text)
     if match:
         return match.group(1).strip()
@@ -255,15 +262,17 @@ def register_sql_tools(
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
         except ImportError:
             log("SQL data tool failed - pyodbc not installed", tool=tool)
-            return f"{_ERROR_PREFIX} the server is missing the pyodbc package."
+            raise ToolError(f"{_ERROR_PREFIX} the server is missing the pyodbc package.")
         except Exception as exc:
             log("SQL data tool failed", tool=tool, proc=proc, error=str(exc)[:500])
-            return f"{_ERROR_PREFIX} {_clean_sql_error(exc)}"
+            raise ToolError(f"{_ERROR_PREFIX} {_clean_sql_error(exc)}")
         log("SQL data tool ok", tool=tool, proc=proc, rows=len(rows))
         return _format_rows(title, columns, rows, note)
 
     def _bad_input(exc: Exception) -> str:
-        return f"{_ERROR_PREFIX} {exc}"
+        # Raises so MCP clients get isError: true; the tools' "return _bad_input(...)"
+        # lines never actually return.
+        raise ToolError(f"{_ERROR_PREFIX} {exc}")
 
     async def ACES_Office_Volume(startDate: str, endDate: str, grain: str = "month") -> str:
         """
@@ -437,8 +446,15 @@ def register_sql_tools(
                 "task_id": "",
                 "project_id": "",
             })
+        except ToolError as exc:
+            return JSONResponse({
+                "status": "failed",
+                "answer": str(exc),
+                "task_id": "",
+                "project_id": "",
+            })
         return JSONResponse({
-            "status": "failed" if answer.startswith(_ERROR_PREFIX) else "completed",
+            "status": "completed",
             "answer": answer,
             "task_id": "",
             "project_id": "",
