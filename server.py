@@ -22,6 +22,8 @@ import httpx
 from fastmcp import FastMCP
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
+import aces_sql_tools
+
 
 mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
@@ -2117,7 +2119,7 @@ async def health_check(request):
                 "/arcgis-parcel-map",
                 "/arcgis-candidate-peers",
                 "/context-expert-file/{token}",
-            ],
+            ] + (["/data-tool"] if aces_sql_tools.REGISTERED else []),
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
             "smart_tasks_project_id": SMART_TASKS_PROJECT_ID,
             "smart_tasks_poll_seconds": SMART_TASKS_POLL_SECONDS,
@@ -2144,6 +2146,8 @@ async def health_check(request):
             "public_base_url": PUBLIC_BASE_URL,
             "file_link_ttl_seconds": FILE_LINK_TTL_SECONDS,
             "file_link_cache_count": len(FILE_LINK_CACHE),
+            "sql_tools_enabled": aces_sql_tools.SQL_TOOLS_ENABLED,
+            "sql_tools_registered": aces_sql_tools.REGISTERED,
             "tools": [
                 "Community_Educator",
                 "Assessment_Context_Expert",
@@ -2154,7 +2158,7 @@ async def health_check(request):
                 "ArcGIS_Public_Parcel_Lookup",
                 "ArcGIS_Public_Parcel_Map",
                 "ArcGIS_Public_Candidate_Peers",
-            ],
+            ] + (aces_sql_tools.TOOL_NAMES if aces_sql_tools.REGISTERED else []),
         }
     )
 
@@ -4039,6 +4043,15 @@ async def Check_CustomGPT_Task(projectId: str, taskId: str) -> str:
     if the task has completed.
     """
     return await _check_customgpt_task_result(project_id=str(projectId).strip(), task_id=str(taskId).strip())
+
+
+# Read-only ACES data tools (ai_api procedures). Off unless ACES_SQL_TOOLS_ENABLED=true.
+aces_sql_tools.register_sql_tools(
+    mcp,
+    log=_log,
+    require_rest_auth=_require_rest_auth,
+    normalize_address=_normalize_arcgis_situs_from_user_text,
+)
 
 
 if __name__ == "__main__":
