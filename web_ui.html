@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<meta name="aces-user" content="__ACES_USER__">
 <title>A.C.E.S.</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231D2B36'/%3E%3Cpath d='M6 24 L13 8 L19 18 L26 12' stroke='%23E0809C' stroke-width='2.5' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -504,6 +505,31 @@ let chatBusy = false;
 
 class AuthError extends Error {}
 
+// Filled in by the server when the person came in through county sign-in.
+const signedInUser = (() => {
+  const m = document.querySelector('meta[name="aces-user"]');
+  const v = m ? (m.getAttribute("content") || "").trim() : "";
+  // An unfilled placeholder starts with "__". Don't write the placeholder's full name
+  // here: the server replaces every copy of it, which would blank this check.
+  return v && !v.startsWith("__") ? v : "";
+})();
+const LOGIN_URL = "/.auth/login/aad?post_login_redirect_uri=/ui";
+const LOGOUT_URL = "/.auth/logout?post_logout_redirect_uri=/ui";
+
+function authHeaders() {
+  // Signed-in browsers are authorized by their sign-in session; the key is only for key mode.
+  return accessKey ? { "x-aces-mcp-key": accessKey } : {};
+}
+
+function handleAuthFailure(message) {
+  if (signedInUser) {
+    // The sign-in session ran out. Sign in again and come back here.
+    location.href = LOGIN_URL;
+    return;
+  }
+  disconnect(message);
+}
+
 /* ---------- Server calls ---------- */
 
 function parseEventStream(text) {
@@ -530,7 +556,7 @@ async function rpc(method, params) {
       headers: {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "x-aces-mcp-key": accessKey,
+        ...authHeaders(),
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params: params || {} }),
       signal: controller.signal,
@@ -544,6 +570,11 @@ async function rpc(method, params) {
   }
 
   if (response.status === 401) throw new AuthError("The server rejected the access key.");
+  if (response.status === 403) {
+    let msg = "Your account isn't allowed to use A.C.E.S.";
+    try { msg = (await response.json()).error || msg; } catch (e) { /* keep default */ }
+    throw new Error(msg);
+  }
   if (response.status === 503) throw new Error("The server has no access key configured, so the tools are switched off.");
 
   const text = await response.text();
@@ -566,7 +597,7 @@ function setConnState(text, kind) {
 async function connect() {
   const typed = el("keyInput").value.trim();
   if (typed) accessKey = typed;
-  if (!accessKey) {
+  if (!accessKey && !signedInUser) {
     setConnState("Enter the access key first.", "bad");
     el("keyInput").focus();
     return;
@@ -576,12 +607,12 @@ async function connect() {
   try {
     const result = await rpc("tools/list");
     tools = (result.tools || []).slice();
-    sessionStorage.setItem(STORAGE_KEY, accessKey);
+    if (accessKey) sessionStorage.setItem(STORAGE_KEY, accessKey);
     el("keyInput").value = "";
     el("keyInput").closest("div").hidden = true;
     el("connectBtn").hidden = true;
     el("disconnectBtn").hidden = false;
-    setConnState("Connected. " + tools.length + " tools available.", "ok");
+    setConnState((signedInUser ? "Signed in as " + signedInUser + ". " : "Connected. ") + tools.length + " tools available.", "ok");
     renderRail();
     chatEnabled = await checkChatEnabled();
     el("emptyState").hidden = true;
@@ -590,6 +621,10 @@ async function connect() {
     renderChatLog();
     showView(chatEnabled ? "chat" : "tools");
   } catch (err) {
+    if (err instanceof AuthError && signedInUser) {
+      location.href = LOGIN_URL;
+      return;
+    }
     accessKey = "";
     sessionStorage.removeItem(STORAGE_KEY);
     setConnState(err instanceof AuthError ? "The server rejected that access key. Check it and connect again." : err.message, "bad");
@@ -868,7 +903,7 @@ async function runTool(event) {
     renderResult(result, performance.now() - started);
   } catch (err) {
     if (err instanceof AuthError) {
-      disconnect("The server rejected the access key. Connect again with the current key.");
+      handleAuthFailure("The server rejected the access key. Connect again with the current key.");
       return;
     }
     showProblem(err.message);
@@ -1437,12 +1472,12 @@ async function sendChat(text) {
   try {
     const response = await fetch("/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-aces-mcp-key": accessKey },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ messages: chatMessages.concat([question]) }),
       cache: "no-store",
     });
     if (response.status === 401) {
-      disconnect("The server rejected the access key. Connect again with the current key.");
+      handleAuthFailure("The server rejected the access key. Connect again with the current key.");
       return;
     }
     if (!response.ok) {
@@ -1525,7 +1560,14 @@ function newChat() {
 /* ---------- Wiring ---------- */
 
 el("connectForm").addEventListener("submit", (e) => { e.preventDefault(); connect(); });
-el("disconnectBtn").addEventListener("click", () => disconnect());
+el("disconnectBtn").addEventListener("click", () => {
+  if (signedInUser) {
+    sessionStorage.removeItem(CHAT_KEY);
+    location.href = LOGOUT_URL;
+    return;
+  }
+  disconnect();
+});
 el("toolForm").addEventListener("submit", runTool);
 el("toolSelect").addEventListener("change", (e) => { if (e.target.value) selectTool(e.target.value); });
 el("tabChat").addEventListener("click", () => showView("chat"));
@@ -1555,7 +1597,15 @@ if (hashKey) {
   history.replaceState(null, "", location.pathname);
 }
 
-if (accessKey) connect();
+if (signedInUser) {
+  // County sign-in: no key needed, so hide the key box and connect right away.
+  el("keyInput").closest("div").hidden = true;
+  el("connectBtn").hidden = true;
+  el("disconnectBtn").textContent = "Sign out";
+  connect();
+} else if (accessKey) {
+  connect();
+}
 </script>
 </body>
 </html>

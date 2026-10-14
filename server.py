@@ -5,6 +5,8 @@ import asyncio
 import hashlib
 import time
 import secrets
+import base64
+from html import escape as html_escape
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 from typing import Optional, Any, Dict, List, Tuple
@@ -2161,14 +2163,96 @@ async def root_route(request):
     )
 
 
-# Browser console for the MCP tools. The page itself holds no secrets: it asks
-# for the MCP access key, keeps it in that browser tab only, and calls /mcp on
-# the same origin, so the API key middleware still guards every tool call.
+# ---------------------------------------------------------------------------
+# County sign-in (App Service authentication with Microsoft Entra ID)
+# ---------------------------------------------------------------------------
+# When App Service authentication is on, the platform removes any X-MS-CLIENT-PRINCIPAL*
+# headers a client sends and adds its own after a real Entra sign-in. Those headers are
+# only trusted when both of these are true:
+#   ACES_ENTRA_SIGNIN=true       (set by us, in the app settings)
+#   WEBSITE_AUTH_ENABLED=True    (set by App Service itself when authentication is on)
+# If authentication is ever switched off, WEBSITE_AUTH_ENABLED goes away and the server
+# falls back to the access key only, so the headers can't be faked.
+# ACES_ALLOWED_USERS: optional comma-separated sign-in names (e.g. anewe@bernco.gov).
+# When set, only those accounts get in, even if Entra lets others sign in.
+
+ENTRA_SIGNIN_REQUESTED = os.getenv("ACES_ENTRA_SIGNIN", "").strip().lower() in {"1", "true", "yes", "on"}
+WEBSITE_AUTH_ENABLED = os.getenv("WEBSITE_AUTH_ENABLED", "").strip().lower() == "true"
+ENTRA_SIGNIN_ACTIVE = ENTRA_SIGNIN_REQUESTED and WEBSITE_AUTH_ENABLED
+ALLOWED_USERS = {u.strip().lower() for u in os.getenv("ACES_ALLOWED_USERS", "").split(",") if u.strip()}
+ENTRA_LOGIN_URL = "/.auth/login/aad?post_login_redirect_uri=/ui"
+ENTRA_LOGOUT_URL = "/.auth/logout?post_logout_redirect_uri=/ui"
+
+
+def _principal_name(headers: Dict[str, str]) -> str:
+    """Sign-in name from the App Service headers (keys lowercased)."""
+    name = (headers.get("x-ms-client-principal-name") or "").strip()
+    if name:
+        return name
+    raw = (headers.get("x-ms-client-principal") or "").strip()
+    if not raw:
+        return ""
+    try:
+        data = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
+    except Exception:
+        return ""
+    claims: Dict[str, str] = {}
+    for claim in data.get("claims") or []:
+        if isinstance(claim, dict):
+            claims.setdefault(str(claim.get("typ", "")), str(claim.get("val", "")))
+    for key in (
+        "preferred_username",
+        "upn",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn",
+        "email",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        data.get("name_typ"),
+        "name",
+    ):
+        if key and claims.get(key, "").strip():
+            return claims[key].strip()
+    return ""
+
+
+def _signed_in_user(headers: Dict[str, str]) -> Tuple[str, bool]:
+    """(sign-in name, allowed). The name is empty when sign-in isn't active or nobody is signed in."""
+    if not ENTRA_SIGNIN_ACTIVE:
+        return "", False
+    user = _principal_name(headers)
+    if not user:
+        return "", False
+    return user, (not ALLOWED_USERS or user.lower() in ALLOWED_USERS)
+
+
+def _not_on_list_page(user: str) -> Response:
+    page = (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>A.C.E.S.</title></head>"
+        "<body style='font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#1D2B36'>"
+        "<h1>A.C.E.S.</h1>"
+        f"<p>You're signed in as <strong>{html_escape(user)}</strong>, but this account isn't on the A.C.E.S. access list.</p>"
+        "<p>Ask the A.C.E.S. administrator to add you.</p>"
+        f"<p><a href='{ENTRA_LOGOUT_URL}'>Sign out</a></p></body></html>"
+    )
+    return Response(content=page, status_code=403, media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+# Browser console for the MCP tools. The page itself holds no secrets. With county
+# sign-in on, the browser's sign-in session authorizes /mcp and /chat. Without it,
+# the page asks for the MCP access key and keeps it in that browser tab only.
 WEB_UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui.html")
 
 
 @mcp.custom_route("/ui", methods=["GET"])
 async def web_ui_route(request):
+    user = ""
+    if ENTRA_SIGNIN_ACTIVE:
+        user, allowed = _signed_in_user({k.lower(): v for k, v in request.headers.items()})
+        if not user:
+            return RedirectResponse(ENTRA_LOGIN_URL, status_code=302)
+        if not allowed:
+            _log("UI blocked - signed-in user not on the access list", user=user)
+            return _not_on_list_page(user)
     try:
         with open(WEB_UI_FILE, "r", encoding="utf-8") as f:
             html = f.read()
@@ -2177,6 +2261,7 @@ async def web_ui_route(request):
 
     nonce = secrets.token_urlsafe(16)
     html = html.replace("__CSP_NONCE__", nonce)
+    html = html.replace("__ACES_USER__", html_escape(user, quote=True))
     csp = (
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}'; "
@@ -2248,6 +2333,9 @@ async def health_check(request):
             "sql_tools_registered": aces_sql_tools.REGISTERED,
             "chat_enabled": aces_chat.CHAT_ENABLED,
             "chat_provider": aces_chat.CHAT_PROVIDER,
+            "entra_signin_requested": ENTRA_SIGNIN_REQUESTED,
+            "entra_signin_active": ENTRA_SIGNIN_ACTIVE,
+            "allowed_users_count": len(ALLOWED_USERS),
             "chat_model": aces_chat.CHAT_MODEL if aces_chat.CHAT_ENABLED else "",
             "chat_workspace_set": bool(aces_chat.ANTHROPIC_WORKSPACE_ID),
             "tools": [
@@ -4354,7 +4442,7 @@ aces_chat.register_chat(mcp, log=_log)
 # ---------------------------------------------------------------------------
 
 def _requires_mcp_key(path: str) -> bool:
-    """/mcp and /chat both run tools, so both need the MCP access key."""
+    """/mcp and /chat both run tools, so both need the MCP access key or a county sign-in."""
     return path == "/mcp" or path.startswith("/mcp/") or path == "/chat"
 
 
@@ -4378,12 +4466,28 @@ class McpApiKeyMiddleware:
             await self.app(scope, receive, send)
             return
 
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+
+        # County sign-in: a browser with a valid Entra session gets in without the key.
+        user, allowed = _signed_in_user(headers)
+        if user:
+            if not allowed:
+                _log("Request blocked - signed-in user not on the access list", path=path, user=user)
+                response = JSONResponse(
+                    {"error": "Your account isn't on the A.C.E.S. access list. Ask the A.C.E.S. administrator to add you."},
+                    status_code=403,
+                )
+                await response(scope, receive, send)
+                return
+            scope.setdefault("state", {})["aces_user"] = user
+            await self.app(scope, receive, send)
+            return
+
         if not ACES_MCP_API_KEY:
             response = JSONResponse({"error": "MCP endpoint is not configured. Set ACES_MCP_API_KEY."}, status_code=503)
             await response(scope, receive, send)
             return
 
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         supplied = headers.get("x-aces-mcp-key", "").strip()
         if not supplied:
             auth = headers.get("authorization", "").strip()

@@ -645,6 +645,14 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
         except ChatError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+        # Set by server.py's middleware when the request came from a county sign-in.
+        user = str((request.scope.get("state") or {}).get("aces_user") or "")
+
+        def chat_log(message: str, **kwargs: Any) -> None:
+            if user:
+                kwargs["user"] = user
+            log(message, **kwargs)
+
         queue: asyncio.Queue = asyncio.Queue()
 
         async def emit(event: Dict[str, Any]) -> None:
@@ -652,12 +660,12 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
 
         async def worker() -> None:
             try:
-                await _run_chat(mcp, history, emit, log)
+                await _run_chat(mcp, history, emit, chat_log)
             except ChatError as exc:
-                log("chat failed", error=str(exc)[:300])
+                chat_log("chat failed", error=str(exc)[:300])
                 await emit({"type": "error", "message": str(exc)})
             except Exception as exc:
-                log("chat failed unexpectedly", error=f"{exc.__class__.__name__}: {str(exc)[:300]}")
+                chat_log("chat failed unexpectedly", error=f"{exc.__class__.__name__}: {str(exc)[:300]}")
                 await emit({"type": "error", "message": "The chat failed on the server. Check the server log for details."})
             finally:
                 await queue.put(None)
