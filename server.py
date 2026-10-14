@@ -2247,6 +2247,7 @@ async def health_check(request):
             "sql_tools_enabled": aces_sql_tools.SQL_TOOLS_ENABLED,
             "sql_tools_registered": aces_sql_tools.REGISTERED,
             "chat_enabled": aces_chat.CHAT_ENABLED,
+            "chat_provider": aces_chat.CHAT_PROVIDER,
             "chat_model": aces_chat.CHAT_MODEL if aces_chat.CHAT_ENABLED else "",
             "chat_workspace_set": bool(aces_chat.ANTHROPIC_WORKSPACE_ID),
             "tools": [
@@ -4344,7 +4345,7 @@ aces_sql_tools.register_sql_tools(
     nov_link=_nov_explainer_url_or_empty,
 )
 
-# One-conversation chat over these tools (Claude via the Anthropic API). Off unless ANTHROPIC_API_KEY is set.
+# One-conversation chat over these tools (Azure OpenAI or the Anthropic API; see aces_chat.py). Off until a provider is configured.
 aces_chat.register_chat(mcp, log=_log)
 
 

@@ -1,28 +1,49 @@
 """
 A.C.E.S. chat: one conversation where staff ask questions in plain language and
-Claude decides which of this server's tools to call.
+the model decides which of this server's tools to call.
 
 How it works
   - The browser keeps the conversation (sessionStorage in that tab) and sends it
     with each new question to POST /chat. The server stays stateless, so restarts
     and redeploys don't lose anything the user can still see.
-  - The server calls the Anthropic Messages API with this server's MCP tools as
-    Claude tools, runs any tool calls in-process through a FastMCP client, and
-    loops until Claude answers. Progress streams back as newline-delimited JSON.
+  - The server sends the conversation and this server's MCP tools to the chat
+    model, runs any tool calls in-process through a FastMCP client, and loops
+    until the model answers. Progress streams back as newline-delimited JSON.
+  - Two model providers are supported. The conversation is always stored in the
+    same shape (text, tool_use and tool_result blocks), so the browser page and
+    the tool loop don't change when the provider does; only _call_model differs.
   - /chat is guarded by the same x-aces-mcp-key check as /mcp (see server.py).
 
 Settings (environment variables)
-  ANTHROPIC_API_KEY          required; chat is off without it
+  ACES_CHAT_PROVIDER         azure_openai or anthropic. Default: azure_openai when
+                             AZURE_OPENAI_ENDPOINT is set, otherwise anthropic.
+
+  Azure OpenAI (keeps prompts and tool results inside the county's Azure tenant)
+  AZURE_OPENAI_ENDPOINT      e.g. https://aoai-aces-bernco.openai.azure.com
+  AZURE_OPENAI_DEPLOYMENT    the deployment name, e.g. aces-chat
+  AZURE_OPENAI_API_KEY       optional. Leave unset on Azure App Service: the app's
+                             managed identity is used instead (needs the
+                             Cognitive Services OpenAI User role on the resource).
+  ACES_CHAT_REASONING_EFFORT optional: none, low, medium or high
+
+  Anthropic
+  ANTHROPIC_API_KEY          required for this provider
   ACES_CHAT_MODEL            default claude-sonnet-5-5
-  ACES_CHAT_MAX_TOKENS       default 4096 (per model reply)
+
+  Both
+  ACES_CHAT_MAX_TOKENS       per model reply. Default 4096 (Anthropic) or 16000
+                             (Azure OpenAI, where reasoning counts toward the limit)
   ACES_CHAT_MAX_TOOL_ROUNDS  default 8 (model/tool cycles per question)
   ACES_CHAT_HISTORY_CHARS    default 120000 (older turns are dropped past this)
   ACES_ANTHROPIC_BASE_URL    default https://api.anthropic.com (override for a gateway)
   ACES_ANTHROPIC_WORKSPACE_ID only for keys that aren't tied to one workspace (wrkspc_...)
 
 Data note: staff questions and tool results (including ACES and public parcel
-data) are sent to the Anthropic API to produce answers. Prompts and answers are
-not written to the server log; only tool names, timings and token counts are.
+data) are sent to the configured model provider to produce answers. With
+azure_openai that is the Azure OpenAI resource in the county's own tenant, and
+requests are sent with store=false so the service doesn't keep the conversation.
+With anthropic it is the Anthropic API. Prompts and answers are not written to
+the server log; only tool names, timings and token counts are.
 """
 
 import asyncio
@@ -43,15 +64,45 @@ except Exception:  # pragma: no cover
 
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
-CHAT_MODEL = os.getenv("ACES_CHAT_MODEL", "claude-sonnet-5-5").strip() or "claude-sonnet-5-5"
-CHAT_MAX_TOKENS = int(os.getenv("ACES_CHAT_MAX_TOKENS", "4096"))
+
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+AZURE_OPENAI_SCOPE_RESOURCE = "https://cognitiveservices.azure.com"
+CHAT_REASONING_EFFORT = os.getenv("ACES_CHAT_REASONING_EFFORT", "").strip().lower()
+# App Service sets these when the app has a managed identity.
+IDENTITY_ENDPOINT = os.getenv("IDENTITY_ENDPOINT", "").strip()
+IDENTITY_HEADER = os.getenv("IDENTITY_HEADER", "").strip()
+
+CHAT_PROVIDER = os.getenv("ACES_CHAT_PROVIDER", "").strip().lower() or (
+    "azure_openai" if AZURE_OPENAI_ENDPOINT else "anthropic"
+)
+if CHAT_PROVIDER == "azure_openai":
+    CHAT_MODEL = AZURE_OPENAI_DEPLOYMENT
+    CHAT_MAX_TOKENS = int(os.getenv("ACES_CHAT_MAX_TOKENS", "16000"))
+else:
+    CHAT_PROVIDER = "anthropic"
+    CHAT_MODEL = os.getenv("ACES_CHAT_MODEL", "claude-sonnet-5-5").strip() or "claude-sonnet-5-5"
+    CHAT_MAX_TOKENS = int(os.getenv("ACES_CHAT_MAX_TOKENS", "4096"))
 CHAT_MAX_TOOL_ROUNDS = max(1, int(os.getenv("ACES_CHAT_MAX_TOOL_ROUNDS", "8")))
 CHAT_HISTORY_CHARS = int(os.getenv("ACES_CHAT_HISTORY_CHARS", "120000"))
 ANTHROPIC_BASE_URL = os.getenv("ACES_ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_WORKSPACE_ID = os.getenv("ACES_ANTHROPIC_WORKSPACE_ID", "").strip()
 
-CHAT_ENABLED = bool(ANTHROPIC_API_KEY)
+if CHAT_PROVIDER == "azure_openai":
+    CHAT_ENABLED = bool(
+        AZURE_OPENAI_ENDPOINT
+        and AZURE_OPENAI_DEPLOYMENT
+        and (AZURE_OPENAI_API_KEY or (IDENTITY_ENDPOINT and IDENTITY_HEADER))
+    )
+    CHAT_OFF_REASON = (
+        "set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT, and either give the app a managed "
+        "identity or set AZURE_OPENAI_API_KEY"
+    )
+else:
+    CHAT_ENABLED = bool(ANTHROPIC_API_KEY)
+    CHAT_OFF_REASON = "set ANTHROPIC_API_KEY"
 
 MAX_USER_TEXT_CHARS = 8000
 MAX_TOOL_RESULT_CHARS = 20000
@@ -218,6 +269,16 @@ def _clean_history(raw: Any) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 async def _call_model(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Returns {"content": [blocks], "stop_reason": ..., "usage": {...}} in the shape the
+    tool loop uses (text / tool_use blocks; stop_reason tool_use, max_tokens or end_turn).
+    """
+    if CHAT_PROVIDER == "azure_openai":
+        return await _call_azure_openai(messages, tools)
+    return await _call_anthropic(messages, tools)
+
+
+async def _call_anthropic(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
     payload = {
         "model": CHAT_MODEL,
         "max_tokens": CHAT_MAX_TOKENS,
@@ -264,6 +325,199 @@ async def _call_model(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]
             raise ChatError(message)
         return response.json()
     raise ChatError(f"The Anthropic API is busy right now (HTTP {last_status}).")
+
+
+# ---------------------------------------------------------------------------
+# Azure OpenAI (Responses API, v1 endpoint)
+# ---------------------------------------------------------------------------
+
+_token_cache: Dict[str, Any] = {"token": "", "expires": 0.0}
+
+
+async def _managed_identity_token() -> str:
+    """Token for Azure OpenAI from the App Service managed identity, cached until near expiry."""
+    if _token_cache["token"] and time.time() < _token_cache["expires"] - 300:
+        return _token_cache["token"]
+    if not (IDENTITY_ENDPOINT and IDENTITY_HEADER):
+        raise ChatError(
+            "This server has no managed identity to sign in to Azure OpenAI. "
+            "Turn on the app's system-assigned identity, or set AZURE_OPENAI_API_KEY."
+        )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15)) as client:
+            response = await client.get(
+                IDENTITY_ENDPOINT,
+                params={"resource": AZURE_OPENAI_SCOPE_RESOURCE, "api-version": "2019-08-01"},
+                headers={"X-IDENTITY-HEADER": IDENTITY_HEADER},
+            )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        raise ChatError(f"Couldn't get a managed identity token for Azure OpenAI: {exc.__class__.__name__}.")
+    _token_cache["token"] = data.get("access_token", "")
+    try:
+        _token_cache["expires"] = float(data.get("expires_on", 0))
+    except (TypeError, ValueError):
+        _token_cache["expires"] = time.time() + 1800
+    if not _token_cache["token"]:
+        raise ChatError("The managed identity endpoint didn't return a token for Azure OpenAI.")
+    return _token_cache["token"]
+
+
+def _to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stored conversation (text / tool_use / tool_result blocks) to Responses API input items."""
+    items: List[Dict[str, Any]] = []
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+        if isinstance(content, str):
+            items.append({"role": role, "content": content})
+            continue
+        texts: List[str] = []
+
+        def flush_text() -> None:
+            if texts:
+                items.append({"role": role, "content": "\n\n".join(texts)})
+                texts.clear()
+
+        for block in content:
+            kind = block.get("type")
+            if kind == "text":
+                texts.append(block["text"])
+            elif kind == "tool_use":
+                flush_text()
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": block["id"],
+                        "name": block["name"],
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    }
+                )
+            elif kind == "tool_result":
+                flush_text()
+                output = block.get("content") or ""
+                if block.get("is_error"):
+                    output = "TOOL ERROR: " + output
+                items.append({"type": "function_call_output", "call_id": block["tool_use_id"], "output": output})
+        flush_text()
+    return items
+
+
+def _from_responses_output(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Responses API result to the {"content", "stop_reason", "usage"} shape the tool loop uses."""
+    blocks: List[Dict[str, Any]] = []
+    for item in data.get("output") or []:
+        kind = item.get("type")
+        if kind == "message":
+            for part in item.get("content") or []:
+                if part.get("type") == "output_text" and str(part.get("text", "")).strip():
+                    blocks.append({"type": "text", "text": part["text"]})
+                elif part.get("type") == "refusal" and str(part.get("refusal", "")).strip():
+                    blocks.append({"type": "text", "text": part["refusal"]})
+        elif kind == "function_call":
+            try:
+                arguments = json.loads(item.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                arguments = {}
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": str(item.get("call_id") or item.get("id") or ""),
+                    "name": str(item.get("name") or ""),
+                    "input": arguments if isinstance(arguments, dict) else {},
+                }
+            )
+        # Reasoning items are not kept: requests use store=false, and the next turn
+        # works from the tool results and visible text.
+
+    if any(b["type"] == "tool_use" for b in blocks):
+        stop_reason = "tool_use"
+    elif data.get("status") == "incomplete" and (data.get("incomplete_details") or {}).get("reason") == "max_output_tokens":
+        stop_reason = "max_tokens"
+    else:
+        stop_reason = "end_turn"
+
+    usage = data.get("usage") or {}
+    return {
+        "content": blocks,
+        "stop_reason": stop_reason,
+        "usage": {
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+        },
+    }
+
+
+def _responses_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # strict=False: MCP tool schemas have optional fields, which strict mode rejects.
+    return [
+        {
+            "type": "function",
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["input_schema"],
+            "strict": False,
+        }
+        for t in tools
+    ]
+
+
+async def _call_azure_openai(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": AZURE_OPENAI_DEPLOYMENT,
+        "instructions": _system_prompt(),
+        "input": _to_responses_input(messages),
+        "tools": _responses_tools(tools),
+        "max_output_tokens": CHAT_MAX_TOKENS,
+        "store": False,
+    }
+    if CHAT_REASONING_EFFORT:
+        payload["reasoning"] = {"effort": CHAT_REASONING_EFFORT}
+
+    url = f"{AZURE_OPENAI_ENDPOINT}/openai/v1/responses"
+    timeout = httpx.Timeout(connect=15, read=180, write=30, pool=15)
+    last_status = None
+    for attempt in range(3):
+        headers = {"content-type": "application/json"}
+        if AZURE_OPENAI_API_KEY:
+            headers["api-key"] = AZURE_OPENAI_API_KEY
+        else:
+            headers["authorization"] = f"Bearer {await _managed_identity_token()}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            raise ChatError(f"Couldn't reach Azure OpenAI: {exc.__class__.__name__}.")
+
+        last_status = response.status_code
+        if response.status_code == 401 and not AZURE_OPENAI_API_KEY and attempt < 2:
+            _token_cache["token"] = ""  # token may have expired or been revoked; get a fresh one
+            continue
+        if response.status_code in (429, 500, 502, 503):
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            break
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("error", {}).get("message", "")
+            except Exception:
+                detail = response.text[:300]
+            message = f"Azure OpenAI returned HTTP {response.status_code}. {detail}".strip()
+            if response.status_code in (401, 403) and not AZURE_OPENAI_API_KEY:
+                message += (
+                    " Check that the app's managed identity has the Cognitive Services OpenAI User role "
+                    "on the Azure OpenAI resource (new role assignments can take a few minutes)."
+                )
+            if response.status_code == 404:
+                message += f" Check that a deployment named '{AZURE_OPENAI_DEPLOYMENT}' exists."
+            raise ChatError(message)
+        return _from_responses_output(response.json())
+    raise ChatError(f"Azure OpenAI is busy right now (HTTP {last_status}).")
 
 
 def _tool_definitions(listed: List[Any]) -> List[Dict[str, Any]]:
@@ -344,7 +598,7 @@ async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
                 break
 
             if reply_text:
-                # Show what Claude said before using tools, the same way it shows after a reload.
+                # Show what the model said before using tools, the same way it shows after a reload.
                 await emit({"type": "text", "text": reply_text})
 
             if round_number == CHAT_MAX_TOOL_ROUNDS:
@@ -380,7 +634,7 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
     @mcp.custom_route("/chat", methods=["POST"])
     async def chat_route(request):
         if not CHAT_ENABLED:
-            return JSONResponse({"error": "Chat is off on this server. An administrator needs to set ANTHROPIC_API_KEY."}, status_code=503)
+            return JSONResponse({"error": f"Chat is off on this server. An administrator needs to {CHAT_OFF_REASON}."}, status_code=503)
 
         try:
             body = await request.json()
@@ -428,7 +682,7 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
         )
 
     if CHAT_ENABLED:
-        log("chat enabled", model=CHAT_MODEL, max_tool_rounds=CHAT_MAX_TOOL_ROUNDS)
+        log("chat enabled", provider=CHAT_PROVIDER, model=CHAT_MODEL, max_tool_rounds=CHAT_MAX_TOOL_ROUNDS)
     else:
-        log("chat disabled (ANTHROPIC_API_KEY is not set)")
+        log("chat disabled", provider=CHAT_PROVIDER, fix=CHAT_OFF_REASON)
     return CHAT_ENABLED
