@@ -1,4 +1,3 @@
-```yaml
 services:
   - type: web
     name: aces-mcp-server
@@ -39,4 +38,9 @@ services:
 
       - key: ACES_ADMIN_TOKEN
         sync: false
-```
+
+      - key: NOV_EXPLAINER_URL
+        value: "https://func-nov-explainer-bernco.azurewebsites.net/nov"
+
+      - key: UPC_ROUTER_URL
+        value: "https://thecraftyslayer.github.io/upcrouter/"

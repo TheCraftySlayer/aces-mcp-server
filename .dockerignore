@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.env
+*.xml
+start-aces.bat
+start-aces.ps1
+render.yaml
+call.json
+day.json
+list.json

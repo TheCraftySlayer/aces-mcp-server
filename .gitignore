@@ -1,0 +1,15 @@
+# Secrets: never commit these
+.env
+.env.*
+_env
+*Key.txt
+*Secret.txt
+*Token.txt
+local-secrets.xml
+
+# Python build files
+__pycache__/
+*.pyc
+
+# Local test output
+/tmp/

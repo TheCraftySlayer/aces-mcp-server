@@ -20,17 +20,22 @@ os.environ.setdefault("FASTMCP_JSON_RESPONSE", "true")
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 import aces_sql_tools
+import aces_chat
 
 
 # Describe the SQL data tools to the model only when they will actually register.
 _SQL_TOOLS_NOTE = (
-    " Also exposes seven read-only ACES data tools (ACES_Office_Volume, ACES_Forecast, "
-    "ACES_Forecast_Accuracy, ACES_NOV_Parcel, ACES_NOV_Search, ACES_NOV_Coverage, ACES_Deed_Volume) "
-    "that query the ACES database through fixed stored procedures."
+    " Also exposes nine read-only ACES data tools (ACES_Office_Volume, ACES_Forecast, "
+    "ACES_Forecast_Accuracy, ACES_NOV_Parcel, ACES_NOV_Search, ACES_NOV_Coverage, ACES_Deed_Volume, "
+    "ACES_Assessment_Calendar, ACES_Daily_Briefing) that query the ACES database through fixed stored "
+    "procedures. ACES_Daily_Briefing combines today's forecast, the last open day's results, recent deed "
+    "volume and upcoming calendar dates in one call. ACES_NOV_Parcel and ACES_NOV_Search results include "
+    "NOV Explainer links."
     if aces_sql_tools.SQL_TOOLS_ENABLED and not aces_sql_tools._config_problem()
     else ""
 )
@@ -40,9 +45,10 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes nine tools: Community_Educator, Assessment_Context_Expert, "
+        "Exposes eleven tools: Community_Educator, Assessment_Context_Expert, "
         "Clear_Expectations, Compliance_Expert, Smart_Tasks, Check_CustomGPT_Task, "
-        "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, and ArcGIS_Public_Candidate_Peers. "
+        "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, ArcGIS_Public_Candidate_Peers, "
+        "NOV_Explainer_Link, and UPC_Router_Link. "
         "The five CustomGPT specialist tools take exactly one promptText string and return plain text. "
         "Community_Educator uses CustomGPT Plan & Act task mode because project 9262 has Plan & Act enabled. "
         "Smart_Tasks submits to CustomGPT project 9262 using Plan & Act task mode for Smart Tasks, code, file, dashboard, and multi-step work. "
@@ -50,6 +56,8 @@ mcp = FastMCP(
         "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. "
         "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
         "ArcGIS_Public_Candidate_Peers returns ArcGIS-only candidate parcel peers for comp triage when living area/sale data is unavailable in GIS. "
+        "NOV_Explainer_Link takes a UPC and returns a link to the staff NOV Explainer page for that account. "
+        "UPC_Router_Link takes a list of UPCs and returns a link that opens the field route planner with them filled in. "
         "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
     ) + _SQL_TOOLS_NOTE,
 )
@@ -104,6 +112,22 @@ BERNCO_EXPERIENCE_DATA_SOURCE_ID = os.getenv(
     "BERNCO_EXPERIENCE_DATA_SOURCE_ID",
     "f0093002972e4f1e823c0368ea06cf75-19e83adb259-layer-9-1",
 ).strip()
+
+# Staff NOV Explainer (Azure Function App, Entra sign-in). NOV_Explainer_Link
+# builds "<url>?upc=<UPC>" links to it. Change this when the app moves to production.
+NOV_EXPLAINER_URL = (
+    os.getenv("NOV_EXPLAINER_URL", "").strip()
+    or "https://func-nov-explainer-bernco.azurewebsites.net/nov"
+).rstrip("/")
+
+# Assessor Property Route Planner (UPC Router). UPC_Router_Link builds
+# "<url>#upcs=<UPC>,<UPC>" links; the planner fills its UPC box from the hash.
+UPC_ROUTER_URL = (
+    os.getenv("UPC_ROUTER_URL", "").strip()
+    or "https://thecraftyslayer.github.io/upcrouter/"
+)
+UPC_ROUTER_MAX_UPCS = 150      # longer lists should be split into separate routes
+UPC_ROUTER_ROAD_TIME_LIMIT = 44  # the planner's road-time ordering limit; above this it orders by proximity
 
 # When true, Assessment_Context_Expert HomeHarvest/address/comps tasks are
 # pre-enriched with public ArcGIS parcel context before the CustomGPT task is
@@ -678,6 +702,10 @@ def _normalize_aces_result(
         "final answer was empty",
         "did not return a task id",
         "received an empty prompttext",
+        "conversation create failed",
+        "conversation create did not return a session id",
+        "conversation message failed",
+        "conversation response was empty",
     ]
     if any(marker in lower for marker in failed_markers):
         return {
@@ -2127,7 +2155,46 @@ async def root_route(request):
             "service": "aces-mcp-server",
             "health": "/health",
             "mcp": "/mcp",
+            "chat": "/chat",
+            "ui": "/ui",
         }
+    )
+
+
+# Browser console for the MCP tools. The page itself holds no secrets: it asks
+# for the MCP access key, keeps it in that browser tab only, and calls /mcp on
+# the same origin, so the API key middleware still guards every tool call.
+WEB_UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui.html")
+
+
+@mcp.custom_route("/ui", methods=["GET"])
+async def web_ui_route(request):
+    try:
+        with open(WEB_UI_FILE, "r", encoding="utf-8") as f:
+            html = f.read()
+    except FileNotFoundError:
+        return JSONResponse({"error": "web_ui.html is missing. Put it in the same folder as server.py."}, status_code=404)
+
+    nonce = secrets.token_urlsafe(16)
+    html = html.replace("__CSP_NONCE__", nonce)
+    csp = (
+        "default-src 'none'; "
+        f"script-src 'nonce-{nonce}'; "
+        f"style-src 'nonce-{nonce}' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "connect-src 'self'; "
+        "img-src 'self' data:; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Security-Policy": csp,
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -2173,10 +2240,15 @@ async def health_check(request):
             "reuse_running_homeharvest_tasks": REUSE_RUNNING_HOMEHARVEST_TASKS,
             "context_expert_file_links_enabled": CONTEXT_EXPERT_FILE_LINKS_ENABLED,
             "public_base_url": PUBLIC_BASE_URL,
+            "nov_explainer_url": NOV_EXPLAINER_URL,
+            "upc_router_url": UPC_ROUTER_URL,
             "file_link_ttl_seconds": FILE_LINK_TTL_SECONDS,
             "file_link_cache_count": len(FILE_LINK_CACHE),
             "sql_tools_enabled": aces_sql_tools.SQL_TOOLS_ENABLED,
             "sql_tools_registered": aces_sql_tools.REGISTERED,
+            "chat_enabled": aces_chat.CHAT_ENABLED,
+            "chat_model": aces_chat.CHAT_MODEL if aces_chat.CHAT_ENABLED else "",
+            "chat_workspace_set": bool(aces_chat.ANTHROPIC_WORKSPACE_ID),
             "tools": [
                 "Community_Educator",
                 "Assessment_Context_Expert",
@@ -2187,6 +2259,8 @@ async def health_check(request):
                 "ArcGIS_Public_Parcel_Lookup",
                 "ArcGIS_Public_Parcel_Map",
                 "ArcGIS_Public_Candidate_Peers",
+                "NOV_Explainer_Link",
+                "UPC_Router_Link",
             ] + (aces_sql_tools.TOOL_NAMES if aces_sql_tools.REGISTERED else []),
         }
     )
@@ -2872,9 +2946,9 @@ async def agent_call_route(request):
 
 def _require_config(project_id: str, tool_name: str) -> Optional[str]:
     if not CUSTOMGPT_API_TOKEN:
-        return "Missing CUSTOMGPT_API_TOKEN on Render."
+        return "Missing CUSTOMGPT_API_TOKEN on this server."
     if not project_id:
-        return f"Missing project id for {tool_name}. Set it in Render Environment."
+        return f"Missing project id for {tool_name}. Set it in the server's environment."
     return None
 
 
@@ -3945,6 +4019,25 @@ async def _call_customgpt_task(
         return answer
 
 
+def _specialist_result(text: str) -> str:
+    """
+    The specialist helpers return plain text for everything, including setup
+    problems and failed tasks. Raise those as ToolError so MCP clients (and the
+    chat) see isError: true instead of treating the message as an answer.
+    Only the first line is checked, because failure messages the server writes
+    always lead with the problem, while a real answer may mention a failed task
+    further down. Still-running notices are not errors.
+    """
+    body = str(text or "").strip()
+    if not body:
+        raise ToolError("The specialist agent returned an empty answer.")
+    first_line = body.splitlines()[0]
+    status = _normalize_aces_result(first_line).get("status")
+    if status in {"failed", "task_not_found"}:
+        raise ToolError(body)
+    return body
+
+
 @mcp.tool
 async def Community_Educator(promptText: str) -> str:
     """
@@ -3953,13 +4046,13 @@ async def Community_Educator(promptText: str) -> str:
     Takes exactly one parameter: promptText.
     """
     _log("Community_Educator invoked", poll_seconds=DEFAULT_POLL_SECONDS)
-    return await _call_customgpt_task(
+    return _specialist_result(await _call_customgpt_task(
         COMMUNITY_PROJECT_ID,
         promptText,
         "Community_Educator",
         action_id=None,
         poll_seconds=DEFAULT_POLL_SECONDS,
-    )
+    ))
 
 
 @mcp.tool
@@ -3974,13 +4067,13 @@ async def Assessment_Context_Expert(promptText: str) -> str:
     needs_report = _request_needs_report_generation(promptText)
     poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else (REPORT_GENERATION_POLL_SECONDS if needs_report else DEFAULT_POLL_SECONDS)
     _log("Assessment_Context_Expert invoked", homeharvest_enabled=bool(action_id), report_generation=needs_report, action_id=action_id or "", poll_seconds=poll_seconds)
-    return await _call_customgpt_task(
+    return _specialist_result(await _call_customgpt_task(
         ASSESSMENT_PROJECT_ID,
         promptText,
         "Assessment_Context_Expert",
         action_id=action_id,
         poll_seconds=poll_seconds,
-    )
+    ))
 
 
 @mcp.tool
@@ -3989,7 +4082,7 @@ async def Clear_Expectations(promptText: str) -> str:
     Use for staff/HR/training, roles, onboarding, IAAO/USPAP, internal policy,
     expectations, benefits, and development questions. Takes exactly one parameter.
     """
-    return await _call_customgpt_conversation(CLEAR_PROJECT_ID, promptText, "Clear_Expectations")
+    return _specialist_result(await _call_customgpt_conversation(CLEAR_PROJECT_ID, promptText, "Clear_Expectations"))
 
 
 @mcp.tool
@@ -4003,13 +4096,13 @@ async def Compliance_Expert(promptText: str) -> str:
     It may return a Task ID / Project ID when still processing.
     """
     _log("Compliance_Expert invoked", poll_seconds=DEFAULT_POLL_SECONDS)
-    return await _call_customgpt_task(
+    return _specialist_result(await _call_customgpt_task(
         COMPLIANCE_PROJECT_ID,
         promptText,
         "Compliance_Expert",
         action_id=None,
         poll_seconds=DEFAULT_POLL_SECONDS,
-    )
+    ))
 
 
 @mcp.tool
@@ -4029,7 +4122,7 @@ async def Smart_Tasks(promptText: str) -> str:
         agent_capability=SMART_TASKS_AGENT_CAPABILITY,
         response_source=SMART_TASKS_RESPONSE_SOURCE,
     )
-    return await _call_customgpt_task(
+    return _specialist_result(await _call_customgpt_task(
         SMART_TASKS_PROJECT_ID,
         promptText,
         "Smart_Tasks",
@@ -4037,7 +4130,7 @@ async def Smart_Tasks(promptText: str) -> str:
         poll_seconds=SMART_TASKS_POLL_SECONDS,
         agent_capability=SMART_TASKS_AGENT_CAPABILITY,
         response_source=SMART_TASKS_RESPONSE_SOURCE,
-    )
+    ))
 
 
 @mcp.tool
@@ -4085,7 +4178,161 @@ async def Check_CustomGPT_Task(projectId: str, taskId: str) -> str:
     returned still_running. Takes projectId and taskId and returns the final answer
     if the task has completed.
     """
-    return await _check_customgpt_task_result(project_id=str(projectId).strip(), task_id=str(taskId).strip())
+    return _specialist_result(await _check_customgpt_task_result(project_id=str(projectId).strip(), task_id=str(taskId).strip()))
+
+
+# RP UPCs are 18 digits (some RP accounts add a 2-character suffix); MH and PP are 6 digits.
+_NOV_UPC_PATTERN = re.compile(r"\d{6}|\d{18}(?:[0-9A-Z]{2})?")
+
+
+def _nov_explainer_upc(value: Any) -> str:
+    """Return a clean UPC for the NOV Explainer link, or raise ToolError with a fix."""
+    raw = str(value or "").strip()
+    upc = re.sub(r"[\s\-.]", "", raw).upper()
+    if _NOV_UPC_PATTERN.fullmatch(upc):
+        return upc
+    if re.search(r"[A-Za-z]{2,}", raw) and re.search(r"\s", raw):
+        raise ToolError(
+            "That looks like an address, not a UPC. Find the UPC first with ACES_NOV_Search "
+            "or ArcGIS_Public_Parcel_Lookup, then call NOV_Explainer_Link with it."
+        )
+    digits = len(re.sub(r"\D", "", upc))
+    raise ToolError(
+        f"'{raw[:40]}' isn't a valid UPC ({digits} digits). Real property UPCs are 18 digits "
+        "(some have a 2-character suffix); manufactured home and personal property accounts are 6 digits. "
+        "Check the number on the notice."
+    )
+
+
+def _nov_explainer_url(upc: Any) -> str:
+    """Link to the NOV Explainer card for a UPC. Raises ToolError for a bad UPC."""
+    return f"{NOV_EXPLAINER_URL}?upc={quote_plus(_nov_explainer_upc(upc))}"
+
+
+def _nov_explainer_url_or_empty(upc: Any) -> str:
+    """Same link, or "" when the UPC doesn't fit. Used to add links to ACES_NOV_* results."""
+    try:
+        return _nov_explainer_url(upc)
+    except ToolError:
+        return ""
+
+
+@mcp.tool
+async def NOV_Explainer_Link(upc: str) -> str:
+    """
+    Use when staff want to open, view, print or share the Notice of Value
+    explanation for an account. Returns a link to the staff NOV Explainer page
+    for that UPC (county sign-in required). Takes the UPC printed on the notice:
+    18 digits for real property (some have a 2-character suffix), 6 digits for
+    manufactured homes and business personal property. Does not look anything
+    up; for an address, get the UPC from ACES_NOV_Search or
+    ArcGIS_Public_Parcel_Lookup first.
+    """
+    clean = _nov_explainer_upc(upc)
+    url = _nov_explainer_url(clean)
+    _log("NOV_Explainer_Link invoked", upc_length=len(clean))
+    return (
+        f"NOV Explainer link for UPC {clean}:\n"
+        f"{url}\n\n"
+        "Opens the staff NOV Explainer (county sign-in required). This tool only builds the link; "
+        "if the account isn't in the latest ACES load, the page will say so."
+    )
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _upc_router_parse(value: Any) -> Dict[str, List[str]]:
+    """
+    Sort a pasted UPC list into what the route planner can take. It routes by
+    parcel, so only 18-digit real property UPCs work. A 20-character account is
+    routed by its 18-digit parcel UPC; 6-digit MH/PP accounts have no parcel.
+    """
+    out: Dict[str, List[str]] = {"upcs": [], "trimmed": [], "mh_pp": [], "invalid": [], "duplicates": []}
+    seen = set()
+    # Split on commas, semicolons and line breaks only, so "1-001-049-..." and
+    # space-grouped UPCs stay whole.
+    for raw in re.split(r"[,;\r\n]+", str(value or "")):
+        raw = raw.strip()
+        if not raw:
+            continue
+        compact = re.sub(r"[\s\-.]", "", raw).upper()
+        if re.fullmatch(r"\d{18}[0-9A-Z]{2}", compact):
+            out["trimmed"].append(compact)
+            compact = compact[:18]
+        elif re.fullmatch(r"\d{6}", compact):
+            out["mh_pp"].append(compact)
+            continue
+        elif not re.fullmatch(r"\d{18}", compact):
+            out["invalid"].append(raw[:40])
+            continue
+        if compact in seen:
+            out["duplicates"].append(compact)
+            continue
+        seen.add(compact)
+        out["upcs"].append(compact)
+    return out
+
+
+@mcp.tool
+async def UPC_Router_Link(upcs: str) -> str:
+    """
+    Use when staff want a field route, a route plan, or to visit a list of
+    parcels. Returns a link that opens the Assessor Property Route Planner and
+    builds the route for those UPCs. Takes one string of UPCs
+    separated by commas or line breaks. Only 18-digit real property UPCs can be
+    routed (a 20-character account uses its first 18 digits); 6-digit
+    manufactured home and personal property accounts are skipped. Does not look
+    anything up; for addresses, get the UPCs from ArcGIS_Public_Parcel_Lookup or
+    ACES_NOV_Search first.
+    """
+    parsed = _upc_router_parse(upcs)
+    found = parsed["upcs"]
+    problems = []
+    if parsed["mh_pp"]:
+        problems.append(
+            f"Skipped {_count(len(parsed['mh_pp']), '6-digit account', '6-digit accounts')} (manufactured home or personal property; "
+            "they have no parcel to route to): " + ", ".join(parsed["mh_pp"][:10])
+        )
+    if parsed["invalid"]:
+        problems.append(
+            f"Skipped {_count(len(parsed['invalid']), 'entry that isn\'t a UPC', 'entries that aren\'t UPCs')}: " + ", ".join(parsed["invalid"][:10])
+        )
+    if not found:
+        raise ToolError(
+            "No routable UPCs. The route planner needs 18-digit real property UPCs."
+            + (" " + " ".join(problems) if problems else "")
+        )
+    if len(found) > UPC_ROUTER_MAX_UPCS:
+        raise ToolError(
+            f"{len(found)} UPCs is more than one link should carry (limit {UPC_ROUTER_MAX_UPCS}). "
+            "Split the list into separate routes, for example by area or day."
+        )
+
+    url = f"{UPC_ROUTER_URL}#upcs={','.join(found)}"
+    _log("UPC_Router_Link invoked", upcs=len(found), skipped=len(parsed["mh_pp"]) + len(parsed["invalid"]))
+
+    lines = [f"Route planner link for {_count(len(found), 'parcel', 'parcels')}:", url, ""]
+    lines.append(
+        "Opens the Assessor Property Route Planner and builds the route, with the map. If public map and "
+        "routing services aren't allowed yet in that browser session, it asks once first. If a route is "
+        "already open there, it fills the UPC box and asks before replacing that route."
+    )
+    if len(found) > UPC_ROUTER_ROAD_TIME_LIMIT:
+        lines.append(
+            f"More than {UPC_ROUTER_ROAD_TIME_LIMIT} stops: the planner will order them by proximity "
+            "instead of drive time. Splitting into smaller routes gives better ordering."
+        )
+    if parsed["trimmed"]:
+        lines.append(
+            _count(len(parsed["trimmed"]), "20-character account was", "20-character accounts were")
+            + " routed by the 18-digit parcel UPC."
+        )
+    if parsed["duplicates"]:
+        lines.append(f"Removed {_count(len(parsed['duplicates']), 'duplicate', 'duplicates')}.")
+    lines.extend(problems)
+    return "\n".join(lines)
 
 
 # Read-only ACES data tools (ai_api procedures). Off unless ACES_SQL_TOOLS_ENABLED=true.
@@ -4094,20 +4341,30 @@ aces_sql_tools.register_sql_tools(
     log=_log,
     require_rest_auth=_require_rest_auth,
     normalize_address=_normalize_arcgis_situs_from_user_text,
+    nov_link=_nov_explainer_url_or_empty,
 )
+
+# One-conversation chat over these tools (Claude via the Anthropic API). Off unless ANTHROPIC_API_KEY is set.
+aces_chat.register_chat(mcp, log=_log)
 
 
 # ---------------------------------------------------------------------------
 # /mcp API key (stopgap until Entra OAuth on the County AI Lab server)
 # ---------------------------------------------------------------------------
 
+def _requires_mcp_key(path: str) -> bool:
+    """/mcp and /chat both run tools, so both need the MCP access key."""
+    return path == "/mcp" or path.startswith("/mcp/") or path == "/chat"
+
+
 class McpApiKeyMiddleware:
     """
-    Require an API key on /mcp only. Other routes are unaffected: / and /health
-    stay open for Render health checks, REST routes keep their own admin token,
-    and /context-expert-file links stay unguessable-token links for staff.
+    Require the API key on /mcp and /chat. Other routes are unaffected: / and
+    /health stay open for Render health checks, /ui is a static page, REST routes
+    keep their own admin token, and /context-expert-file links stay
+    unguessable-token links for staff.
 
-    Fails closed: if ACES_MCP_API_KEY is not set, every /mcp request gets 503.
+    Fails closed: if ACES_MCP_API_KEY is not set, every protected request gets 503.
     Accepts "x-aces-mcp-key: <key>" or "Authorization: Bearer <key>".
     """
 
@@ -4116,7 +4373,7 @@ class McpApiKeyMiddleware:
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
-        if scope.get("type") != "http" or not (path == "/mcp" or path.startswith("/mcp/")):
+        if scope.get("type") != "http" or not _requires_mcp_key(path):
             await self.app(scope, receive, send)
             return
 
@@ -4151,4 +4408,6 @@ if __name__ == "__main__":
     if not ACES_MCP_API_KEY:
         _log("WARNING: ACES_MCP_API_KEY is not set - /mcp will refuse all requests")
     port = int(os.getenv("PORT", "10000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # HOST=127.0.0.1 keeps a local run reachable only from this PC. Render needs the 0.0.0.0 default.
+    host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
+    uvicorn.run(app, host=host, port=port)
