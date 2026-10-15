@@ -396,6 +396,8 @@
     --s1: #1F6E8C; --s2: #A8405F; --s3: #B26D0A; --s4: #2F6B4F; --s5: #6A4C93; --s6: #556570;
   }
   .ch-bg { fill: var(--surface); }
+  .ch-closed { fill: var(--rule); opacity: 0.5; }
+  .chart-legend .key.closed { width: 12px; height: 12px; background: var(--rule); }
   .ch-grid { stroke: var(--rule); stroke-width: 1; }
   .ch-base { stroke: var(--muted); stroke-width: 1; }
   .ch-tick { fill: var(--muted); font: 400 12px var(--sans); font-variant-numeric: tabular-nums; }
@@ -1005,13 +1007,14 @@ function drawChartSvg(spec, width, exportMode, showValues) {
     top += 14;
     const keys = series.map((s, k) => ({ text: s.label, cls: "ch-s" + (k + 1), kind: isBar ? "bar" : "line" }));
     if (band) keys.push({ text: band.label, cls: "ch-s1", kind: "band" });
+    if (spec.closed) keys.push({ text: "Office closed", cls: "ch-closed", kind: "closed" });
     let x = pad;
     let rowY = top + 6;
     for (const key of keys) {
       const w = 22 + key.text.length * 7.2 + 18;
       if (x + w > W - pad && x > pad) { x = pad; rowY += 20; }
       if (key.kind === "line") svgEl("rect", { class: key.cls, x, y: rowY - 5, width: 16, height: 3, rx: 1.5 }, svg);
-      else svgEl("rect", { class: key.kind === "band" ? key.cls + " ch-band-key" : key.cls, x, y: rowY - 9, width: 12, height: 11, rx: 2, opacity: key.kind === "band" ? 0.25 : 1 }, svg);
+      else svgEl("rect", { class: key.kind === "band" ? key.cls + " ch-band-key" : key.cls, x, y: rowY - 9, width: 12, height: 11, rx: 2, opacity: key.kind === "band" ? 0.25 : key.kind === "closed" ? 0.5 : 1 }, svg);
       svgText(svg, x + 22, rowY, key.text, "ch-text");
       x += w;
     }
@@ -1031,6 +1034,21 @@ function drawChartSvg(spec, width, exportMode, showValues) {
   const scaleY = (v) => plotBottom - ((v - dom.lo) / (dom.hi - dom.lo)) * plotH;
   const bandW = plotW / n;
   const xAt = (i) => (isBar ? left + bandW * (i + 0.5) : n === 1 ? left + plotW / 2 : left + (i * plotW) / (n - 1));
+
+  // Closed periods, shaded behind everything else
+  if (spec.closed) {
+    const slotW = isBar ? bandW : n === 1 ? plotW : plotW / (n - 1);
+    // One block per run of closed periods, so neighbors don't leave seams.
+    for (let i = 0; i < n; i++) {
+      if (!spec.closed[i]) continue;
+      let j = i;
+      while (j + 1 < n && spec.closed[j + 1]) j++;
+      const x0 = Math.max(left, xAt(i) - slotW / 2);
+      const x1 = Math.min(right, xAt(j) + slotW / 2);
+      svgEl("rect", { class: "ch-closed", x: x0.toFixed(1), y: plotTop, width: Math.max(1, x1 - x0).toFixed(1), height: plotH }, svg);
+      i = j;
+    }
+  }
 
   // Gridlines and value ticks
   dom.ticks.forEach((t, k) => {
@@ -1145,6 +1163,7 @@ function drawChartSvg(spec, width, exportMode, showValues) {
       const hit = svgEl("rect", { class: "ch-hit", x: (xAt(i) - hitW / 2).toFixed(1), y: plotTop, width: hitW.toFixed(1), height: plotH }, svg);
       const lines = [spec.x.values[i]].concat(series.map((s, k) => s.label + ": " + (s.values[i] === null ? "no data" : fmtNum(s.values[i], seriesDigits[k], true))));
       if (band && band.low[i] !== null) lines.push(band.label + ": " + fmtNum(band.low[i], bandDigits, true) + " to " + fmtNum(band.high[i], bandDigits, true));
+      if (spec.closed && spec.closed[i]) lines.push("Office closed");
       svgEl("title", {}, hit).textContent = lines.join("\n");
     }
   }
@@ -1267,7 +1286,7 @@ function addChart(spec) {
   fig.append(head);
 
   const isBar = spec.type === "bar";
-  if (spec.series.length > 1 || spec.band) {
+  if (spec.series.length > 1 || spec.band || spec.closed) {
     const legend = document.createElement("ul");
     legend.className = "chart-legend";
     const key = (text, cls) => {
@@ -1279,6 +1298,7 @@ function addChart(spec) {
     };
     spec.series.forEach((s, k) => key(s.label, (isBar ? "bar " : "") + "k" + (k + 1)));
     if (spec.band) key(spec.band.label, "band k1");
+    if (spec.closed) key("Office closed", "closed");
     fig.append(legend);
   }
 
@@ -1313,7 +1333,7 @@ function addChart(spec) {
     const digits = spec.series.map((s) => dataDigits(s.values));
     const bandDigits = spec.band ? dataDigits(spec.band.low.concat(spec.band.high)) : 0;
     const rows = spec.x.values.map((x, i) => {
-      const r = [x].concat(spec.series.map((s, k) => fmtNum(s.values[i], digits[k], true)));
+      const r = [spec.closed && spec.closed[i] ? x + " (closed)" : x].concat(spec.series.map((s, k) => fmtNum(s.values[i], digits[k], true)));
       if (spec.band) r.push(fmtNum(spec.band.low[i], bandDigits, true), fmtNum(spec.band.high[i], bandDigits, true));
       return r;
     });

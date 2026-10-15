@@ -351,9 +351,11 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
 
     notes: List[str] = []
     if "partial_days" in rows[0]:
-        partial = sum(1 for r in rows if (_safe_number(r.get("partial_days")) or 0) > 0)
+        partial = [r for r in rows if (_safe_number(r.get("partial_days")) or 0) > 0]
+        # Averages already leave today out, so only totals need the note.
         if partial and any(not c.startswith("avg_") for c in y_cols):
-            notes.append("The period that includes today is still loading, so its totals read low. The avg_ figures leave today out.")
+            when = _friendly_x(partial[-1].get(x_col, ""))
+            notes.append(f"{when} includes today, which is still loading, so it reads low.")
     for col, (meaning, applies_to) in _INCOMPLETE_COLUMNS.items():
         if applies_to and not any(applies_to in c for c in y_cols):
             continue
@@ -366,6 +368,15 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
     if table["limit_reached"]:
         notes.append("The data tool stopped at its row limit, so later periods aren't shown.")
 
+    # Periods when the office was closed the whole time (weekends, holidays) are shaded,
+    # so dips read as closures, not demand. Blank open_days means the calendar isn't
+    # loaded for that period, so it isn't marked either way.
+    closed: Optional[List[bool]] = None
+    if "open_days" in rows[0]:
+        marks = [_safe_number(r.get("open_days")) == 0 for r in rows]
+        if any(marks) and not all(marks):
+            closed = marks
+
     title = _clip(args.get("title"), MAX_TITLE_CHARS) or table["title"][:MAX_TITLE_CHARS]
     spec = {
         "v": 1,
@@ -375,6 +386,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         "yLabel": _clip(args.get("yLabel"), MAX_LABEL_CHARS),
         "series": series,
         "band": band,
+        "closed": closed,
         "notes": notes,
         "source": (f"{table['title']} ({source_name})" if table["title"] else source_name)[:240],
     }
@@ -384,10 +396,24 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         f"{', '.join(s['column'] for s in series)} by {spec['x']['label'].lower()}, {len(rows)} points, "
         f"read directly from the {source_name} result ({table['title']})."
     )
+    if closed:
+        summary += f" Days or periods when the office was closed ({sum(closed)}) are shaded on the chart and labeled Closed."
     if notes:
         summary += " Data notes to pass along: " + " ".join(notes)
     summary += " The chart is on screen; give the takeaway in a sentence or two rather than repeating its numbers."
     return spec, summary
+
+
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _friendly_x(value: Any) -> str:
+    """'2026-10-15' -> 'Oct 15'; anything else as given (for note text)."""
+    s = _x_value(value)
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", s)
+    if m and 1 <= int(m.group(2)) <= 12:
+        return f"{_MONTHS[int(m.group(2)) - 1]} {int(m.group(3))}"
+    return s or "The latest period"
 
 
 def _safe_number(value: Any) -> Optional[float]:
