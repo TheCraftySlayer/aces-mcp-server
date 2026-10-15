@@ -2185,6 +2185,11 @@ async def _enrich_report_generation_prompt_with_arcgis(
 
 @mcp.custom_route("/", methods=["GET", "HEAD"])
 async def root_route(request):
+    # People arrive here from the M365 Apps tile (the sign-in app registration opens
+    # the site root), so browsers go to the chat. Health probes, Always On pings and
+    # scripts don't ask for HTML and still get the JSON below.
+    if "text/html" in request.headers.get("accept", "").lower():
+        return RedirectResponse("/ui", status_code=302)
     return JSONResponse(
         {
             "status": "ok",
