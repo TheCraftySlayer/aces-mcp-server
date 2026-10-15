@@ -562,10 +562,24 @@ def register_sql_tools(
 
     async def ACES_Deed_Volume(startDate: str, endDate: str, grain: str = "month") -> str:
         """
-        Deed workload for a date range grouped by day, week or month: report
-        days, reports, included entries, documents and unreviewed rows. These
-        are volume figures, not a backlog: there is no certified backlog
-        figure, so never describe them as one or estimate one from them.
+        Deed volume for a date range grouped by day, week (Monday start) or
+        month. History goes back to 2012. Each row has first_day/last_day,
+        report_days, documents (distinct recorded documents: the volume
+        figure, comparable across all years), avg_documents_per_report_day,
+        open_days, open_days_without_report, days_needing_review, data_source,
+        and daily_report_days, included_entries and unreviewed_rows. Use
+        documents and avg_documents_per_report_day for volume and trends.
+        included_entries and unreviewed_rows only exist for days loaded from
+        daily reports (daily_report_days); blank means not tracked, not zero,
+        so never compare them across periods. open_days_without_report above 0
+        means reports for those open days aren't loaded, so documents
+        undercount; say so. days_needing_review above 0 means conflicting
+        report files await review and those days aren't in documents; say so.
+        Blank open_days means the office calendar isn't loaded for that
+        period. Ranges: by day up to about 6 months, by week about 3 years, by
+        month 15 years. These are volume figures, not a backlog: there is no
+        certified backlog figure, so never describe them as one or estimate
+        one from them.
         The result ends with how current the deed data is. If it says DEED DATA
         GAP, lead with that: missing days mean the reports weren't loaded, not
         that there was no activity.
