@@ -930,7 +930,8 @@ function yDomain(values) {
   hi = Math.ceil(hi / step - 1e-9) * step;
   const ticks = [];
   for (let k = 0; lo + k * step <= hi + step / 2; k++) ticks.push(lo + k * step);
-  const digits = step >= 1 ? 0 : Math.min(4, Math.ceil(-Math.log10(step) - 1e-9));
+  // As many decimals as the step has (2.5 -> 1, 0.25 -> 2), so ticks are never rounded.
+  const digits = Math.min(4, (String(+step.toFixed(6)).split(".")[1] || "").length);
   return { lo, hi, ticks, digits };
 }
 
@@ -1005,7 +1006,7 @@ function drawChartSvg(spec, width, exportMode, showValues) {
       svgText(svg, pad, top, line, "ch-title");
     }
     top += 14;
-    const keys = series.map((s, k) => ({ text: s.label, cls: "ch-s" + (k + 1), kind: isBar ? "bar" : "line" }));
+    const keys = spec.byMeasure ? [] : series.map((s, k) => ({ text: s.label, cls: "ch-s" + (k + 1), kind: isBar ? "bar" : "line" }));
     if (band) keys.push({ text: band.label, cls: "ch-s1", kind: "band" });
     if (spec.closed) keys.push({ text: "Office closed", cls: "ch-closed", kind: "closed" });
     let x = pad;
@@ -1061,14 +1062,33 @@ function drawChartSvg(spec, width, exportMode, showValues) {
     t.setAttribute("transform", "translate(" + (pad + 12) + " " + (plotTop + plotH / 2) + ") rotate(-90)");
   }
 
-  // Category labels, thinned so they don't collide
-  const longest = Math.max(...spec.x.values.map((v) => label(v).length));
-  const every = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(plotW / (longest * CHAR_W + 14)))));
-  for (let i = 0; i < n; i += every) {
-    const x = xAt(i);
-    const half = (label(spec.x.values[i]).length * CHAR_W) / 2;
-    const anchor = x - half < (exportMode ? pad : 0) ? "start" : x + half > W - pad ? "end" : "middle";
-    svgText(svg, x, plotBottom + 18, label(spec.x.values[i]), "ch-tick", anchor);
+  // Category labels. Named categories on a bar chart wrap onto two lines so none are
+  // dropped; dates and long series are thinned so they don't collide.
+  let labelLines = 1;
+  const wrapChars = Math.floor((bandW - 6) / CHAR_W);
+  const named = isBar && !spec.x.values.every((v) => /^\d{4}-\d{2}-\d{2}$/.test(v));
+  const wrapped = named && wrapChars >= 6 ? spec.x.values.map((v) => {
+    const lines = wrapLines(v, wrapChars);
+    return lines.length > 2 ? [lines[0], lines.slice(1).join(" ").slice(0, wrapChars - 1) + "\u2026"] : lines;
+  }) : null;
+  if (wrapped && wrapped.every((l) => l.every((t) => t.length * CHAR_W <= bandW))) {
+    wrapped.forEach((lines, i) => {
+      const t = svgEl("text", { x: xAt(i), y: plotBottom + 18, class: "ch-tick", "text-anchor": "middle" }, svg);
+      lines.forEach((line, k) => {
+        const span = svgEl("tspan", { x: xAt(i), dy: k === 0 ? 0 : 14 }, t);
+        span.textContent = line;
+      });
+      labelLines = Math.max(labelLines, lines.length);
+    });
+  } else {
+    const longest = Math.max(...spec.x.values.map((v) => label(v).length));
+    const every = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(plotW / (longest * CHAR_W + 14)))));
+    for (let i = 0; i < n; i += every) {
+      const x = xAt(i);
+      const half = (label(spec.x.values[i]).length * CHAR_W) / 2;
+      const anchor = x - half < (exportMode ? pad : 0) ? "start" : x + half > W - pad ? "end" : "middle";
+      svgText(svg, x, plotBottom + 18, label(spec.x.values[i]), "ch-tick", anchor);
+    }
   }
 
   // Shaded range around the first series
@@ -1105,7 +1125,8 @@ function drawChartSvg(spec, width, exportMode, showValues) {
         const x = xAt(i) - inner / 2 + k * bw;
         const y1 = scaleY(Math.max(0, v));
         const y2 = scaleY(Math.min(0, v));
-        svgEl("rect", { class: "ch-bar " + cls, x: x.toFixed(1), y: y1.toFixed(1), width: Math.max(1, bw - (series.length > 1 ? 1.5 : 0)).toFixed(1), height: Math.max(0.5, y2 - y1).toFixed(1), rx: Math.min(2, bw / 4).toFixed(1) }, svg);
+        const barCls = spec.byMeasure ? "ch-s" + ((i % 6) + 1) : cls;
+        svgEl("rect", { class: "ch-bar " + barCls, x: x.toFixed(1), y: y1.toFixed(1), width: Math.max(1, bw - (series.length > 1 ? 1.5 : 0)).toFixed(1), height: Math.max(0.5, y2 - y1).toFixed(1), rx: Math.min(2, bw / 4).toFixed(1) }, svg);
       });
       return;
     }
@@ -1168,7 +1189,7 @@ function drawChartSvg(spec, width, exportMode, showValues) {
     }
   }
 
-  let height = plotBottom + 30;
+  let height = plotBottom + 30 + (labelLines - 1) * 14;
   if (exportMode) {
     const maxChars = Math.floor((W - 2 * pad) / 7.4);
     for (const note of spec.notes || []) {

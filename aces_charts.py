@@ -378,11 +378,28 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
             closed = marks
 
     title = _clip(args.get("title"), MAX_TITLE_CHARS) or table["title"][:MAX_TITLE_CHARS]
+
+    # A one-row result (a summary such as ACES_Forecast_Accuracy) has nothing to plot
+    # along x. Chart its measures as the bars instead: one labeled bar per column.
+    by_measure = len(rows) == 1 and len(series) > 1 and band is None
+    if by_measure:
+        chart_type = "bar"
+        x_spec = {"label": "Measure", "values": [s["label"] for s in series]}
+        series = [{
+            "label": _clip(args.get("yLabel"), MAX_LABEL_CHARS) or "Value",
+            "column": ", ".join(s["column"] for s in series),
+            "values": [s["values"][0] for s in series],
+        }]
+        closed = None
+    else:
+        x_spec = {"label": _pretty(original.get(x_col, x_col)), "values": [_x_value(r.get(x_col, "")) for r in rows]}
+
     spec = {
         "v": 1,
         "type": chart_type,
         "title": title,
-        "x": {"label": _pretty(original.get(x_col, x_col)), "values": [_x_value(r.get(x_col, "")) for r in rows]},
+        "x": x_spec,
+        "byMeasure": by_measure,
         "yLabel": _clip(args.get("yLabel"), MAX_LABEL_CHARS),
         "series": series,
         "band": band,
@@ -391,11 +408,17 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         "source": (f"{table['title']} ({source_name})" if table["title"] else source_name)[:240],
     }
 
-    summary = (
-        f"Chart shown to the user: '{title}', a {chart_type} chart of "
-        f"{', '.join(s['column'] for s in series)} by {spec['x']['label'].lower()}, {len(rows)} points, "
-        f"read directly from the {source_name} result ({table['title']})."
-    )
+    if by_measure:
+        summary = (
+            f"Chart shown to the user: '{title}', a bar chart with one bar per measure "
+            f"({', '.join(x_spec['values'])}), read directly from the single-row {source_name} result ({table['title']})."
+        )
+    else:
+        summary = (
+            f"Chart shown to the user: '{title}', a {chart_type} chart of "
+            f"{', '.join(s['column'] for s in series)} by {spec['x']['label'].lower()}, {len(rows)} points, "
+            f"read directly from the {source_name} result ({table['title']})."
+        )
     if closed:
         summary += f" Days or periods when the office was closed ({sum(closed)}) are shaded on the chart and labeled Closed."
     if notes:
