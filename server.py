@@ -173,9 +173,11 @@ FILE_LINK_TTL_SECONDS = int(os.getenv("ACES_FILE_LINK_TTL_SECONDS", "86400"))
 DEFAULT_POLL_SECONDS = int(os.getenv("ACES_DEFAULT_POLL_SECONDS", "60"))
 HOMEHARVEST_POLL_SECONDS = int(os.getenv("ACES_HOMEHARVEST_POLL_SECONDS", "25"))
 REPORT_GENERATION_POLL_SECONDS = int(os.getenv("ACES_REPORT_GENERATION_POLL_SECONDS", "25"))
-# A specialist task still unfinished this many minutes after it started is reported as
-# stalled (a failure), so the agent stops offering to check it and the task isn't reused.
-TASK_STALL_MINUTES = int(os.getenv("ACES_TASK_STALL_MINUTES", "5"))
+# A specialist task is reported as stalled (a failure) when its progress steps haven't
+# changed for TASK_STALL_MINUTES, or when it has run TASK_MAX_MINUTES in total. A stalled
+# task isn't reused, and the agent stops offering to check it.
+TASK_STALL_MINUTES = int(os.getenv("ACES_TASK_STALL_MINUTES", "4"))
+TASK_MAX_MINUTES = int(os.getenv("ACES_TASK_MAX_MINUTES", "15"))
 POLL_INTERVAL_SECONDS = float(os.getenv("ACES_POLL_INTERVAL_SECONDS", "3"))
 MAX_CACHED_ANSWER_CHARS = int(os.getenv("ACES_MAX_CACHED_ANSWER_CHARS", "80000"))
 
@@ -472,16 +474,27 @@ def _find_task_cache_entry(project_id: str, task_id: str) -> Tuple[Optional[str]
     return None, None
 
 
-def _task_age_minutes(project_id: str, task_id: str) -> Optional[float]:
-    """Minutes since the cached task was created, or None if unknown."""
-    _, entry = _find_task_cache_entry(project_id, task_id)
-    if not isinstance(entry, dict):
-        return None
+def _minutes_since(stamp: Any) -> Optional[float]:
+    """Minutes since a cache timestamp like 2026-10-15T15:12:01Z, or None if unreadable."""
     try:
-        created = datetime.strptime(str(entry.get("created_at") or ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        then = datetime.strptime(str(stamp or ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-    return (datetime.now(timezone.utc) - created).total_seconds() / 60.0
+    return (datetime.now(timezone.utc) - then).total_seconds() / 60.0
+
+
+def _task_stall_reason(project_id: str, task_id: str) -> str:
+    """Why a still-running task counts as stalled, or "" if it doesn't."""
+    _, entry = _find_task_cache_entry(project_id, task_id)
+    if not isinstance(entry, dict):
+        return ""
+    age = _minutes_since(entry.get("created_at"))
+    idle = _minutes_since(entry.get("progress_changed_at") or entry.get("created_at"))
+    if age is not None and age >= TASK_MAX_MINUTES:
+        return f"it has run {int(age)} minutes without finishing"
+    if idle is not None and idle >= TASK_STALL_MINUTES:
+        return f"it has shown no new progress for {int(idle)} minutes"
+    return ""
 
 
 def _cached_answer_for_task(project_id: str, task_id: str) -> str:
@@ -555,7 +568,10 @@ def _remember_task(
     if "created_at" not in existing:
         existing["created_at"] = _now_iso()
     if progress_log is not None:
-        existing["progress_log"] = [str(x) for x in progress_log[-10:]]
+        new_log = [str(x) for x in progress_log[-10:]]
+        if new_log and new_log != existing.get("progress_log"):
+            existing["progress_changed_at"] = _now_iso()
+        existing["progress_log"] = new_log
     if error:
         existing["error"] = str(error)
     if answer is not None:
@@ -603,7 +619,10 @@ def _update_task_cache_by_task_id(
         }
     )
     if progress_log is not None:
-        existing["progress_log"] = [str(x) for x in progress_log[-10:]]
+        new_log = [str(x) for x in progress_log[-10:]]
+        if new_log and new_log != existing.get("progress_log"):
+            existing["progress_changed_at"] = _now_iso()
+        existing["progress_log"] = new_log
     if error:
         existing["error"] = str(error)
     if answer is not None:
@@ -3272,6 +3291,8 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     "- Return the GIS subject context first, HomeHarvest subject facts second if found, then HomeHarvest/public-aggregator candidate results.\n"
     "- Do not treat GIS data as a verified sale, tax status, exemption approval/status, or certified record.\n"
     "- Verify final parcel/account details in iasWorld before relying on them.\n"
+    "- Describe only what the returned data shows. Don't characterize market behavior, trends or neighborhoods beyond the returned rows.\n"
+    "- Don't offer to prepare or assist with a protest. You may explain the protest process if asked.\n"
     "\n"
     "COMP SEARCH QUALITY RULES:\n"
     "- For comp requests, use listing_type=sold or sold status when supported.\n"
@@ -3681,19 +3702,20 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
         message_id = result.get("message_id") if isinstance(result, dict) else None
 
         if latest_status != "completed":
-            age = _task_age_minutes(project_id, task_id)
-            if age is not None and age >= TASK_STALL_MINUTES:
+            # Record this check's progress first, so "no new progress" is measured correctly.
+            _update_task_cache_by_task_id(project_id, task_id, "still_running", latest_status=latest_status, progress_log=progress_log)
+            stall_reason = _task_stall_reason(project_id, task_id)
+            if stall_reason:
                 # Marked "stalled" so identical requests start a fresh task instead of reusing this one.
-                _update_task_cache_by_task_id(project_id, task_id, "stalled", latest_status=latest_status, progress_log=progress_log)
+                _update_task_cache_by_task_id(project_id, task_id, "stalled", latest_status=latest_status)
                 return (
-                    f"Task failed: it was still unfinished after {int(age)} minutes, so it is treated as stalled.\n"
+                    f"Task failed: {stall_reason}, so it is treated as stalled.\n"
                     f"Project ID: {project_id}\n"
                     f"Task ID: {task_id}\n"
                     "The specialist agent didn't return an answer. Don't check this task again. "
                     "For facts about a parcel, use the ACES_NOV or ArcGIS tools, or check iasWorld; "
                     "otherwise ask again with a narrower question."
                 )
-            _update_task_cache_by_task_id(project_id, task_id, "still_running", latest_status=latest_status, progress_log=progress_log)
             return (
                 "Task is not complete yet.\n"
                 f"Project ID: {project_id}\n"
@@ -4182,7 +4204,8 @@ async def Assessment_Context_Expert(promptText: str) -> str:
     For basic facts about a specific parcel (UPC, address, owner, class, values,
     notice details), use ACES_NOV_Search, ACES_NOV_Parcel or
     ArcGIS_Public_Parcel_Lookup instead; they answer in about a second.
-    No A.C.E.S. tool has a parcel's exemption records. If staff ask which
+    A.C.E.S. tools don't have approved exemption records. The public GIS layer
+    may show exemption flags, but those aren't approvals. If staff ask which
     exemptions a parcel has, don't call this tool; tell them to check the
     exemptions tab in iasWorld.
     Takes exactly one parameter: promptText.

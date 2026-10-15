@@ -461,7 +461,10 @@ def register_sql_tools(
         value changed, mailing date, and transfer/permit years. taxYear 0 returns
         all loaded years. Does not include exemptions. Also returns a link to the
         staff NOV Explainer page for the account. For an address, find the UPC
-        with ACES_NOV_Search first.
+        with ACES_NOV_Search first. Percent-change fields are fractions (0.03
+        means 3 percent); state them as percents. Explain a code (land use,
+        reason) only if this result includes its meaning; otherwise give the
+        code as is. Say to verify values in iasWorld before official use.
         """
         try:
             clean_upc, year = _parse_upc(upc), _parse_tax_year(taxYear)
@@ -532,22 +535,52 @@ def register_sql_tools(
             "Notice of Value explanation coverage", _DATA_NOTE,
         )
 
+    async def _deed_freshness_note(tool: str) -> str:
+        """One line on how current the deed data is; "" if the check itself isn't available."""
+        try:
+            columns, rows = await asyncio.to_thread(_run_proc_with_retry, "ai_api.deed_freshness", [])
+        except Exception as exc:
+            log("deed freshness check skipped", tool=tool, error=str(exc)[:300])
+            return ""
+        if not rows:
+            return ""
+        rec = dict(zip([str(c).lower() for c in columns], rows[0]))
+        last = str(rec.get("last_deed_report_date") or "")[:10]
+        try:
+            missing = int(rec.get("open_days_missing") or 0)
+        except (TypeError, ValueError):
+            missing = 0
+        if not last:
+            return "DEED DATA GAP: no deed reports are loaded at all."
+        if missing >= 2:
+            return (
+                f"DEED DATA GAP: the newest deed report loaded is for {last}, and {missing} open office days "
+                "since then have no deed report. Recent deed figures are incomplete because of a loading gap, "
+                "not zero activity; say so."
+            )
+        return f"Deed data is current through {last}."
+
     async def ACES_Deed_Volume(startDate: str, endDate: str, grain: str = "month") -> str:
         """
         Deed workload for a date range grouped by day, week or month: report
         days, reports, included entries, documents and unreviewed rows. These
         are volume figures, not a backlog: there is no certified backlog
         figure, so never describe them as one or estimate one from them.
+        The result ends with how current the deed data is. If it says DEED DATA
+        GAP, lead with that: missing days mean the reports weren't loaded, not
+        that there was no activity.
         """
         try:
             start, end, g = _parse_date(startDate, "startDate"), _parse_date(endDate, "endDate"), _parse_grain(grain)
         except ValueError as exc:
             return _bad_input(exc)
-        return await _call(
+        result = await _call(
             "ACES_Deed_Volume", "ai_api.deed_volume",
             [("start_date", start), ("end_date", end), ("grain", g)],
             f"Deed volume, {start} to {end}, by {g}", _VOLUME_NOTE,
         )
+        note = await _deed_freshness_note("ACES_Deed_Volume")
+        return f"{result}\n{note}" if note else result
 
     async def ACES_Assessment_Calendar(daysAhead: int = 90, daysBack: int = 30) -> str:
         """
@@ -634,7 +667,8 @@ def register_sql_tools(
         and closures, so on a Monday it is the previous Friday. asOf
         (YYYY-MM-DD) runs the briefing as of an earlier date; leave it empty
         for today. Deed figures are volume, not backlog: there is no certified
-        backlog figure, so never describe them as one. Call columns follow
+        backlog figure, so never describe them as one. If the deed section has a
+        DEED DATA GAP line, report it plainly. Call columns follow
         ACES_Office_Volume: inbound = connected + abandoned + voicemail +
         no_outcome_calls, and no_outcome_calls is listed with the other
         outcomes. A section marked
@@ -690,7 +724,10 @@ def register_sql_tools(
             lines.append(_section("== Last open day: forecast vs actual ==", accuracy,
                                   "No forecast was issued for the last open day."))
             lines.append(_section(f"== Deed volume, {last_open - timedelta(days=6)} to {last_open} ==", deeds,
-                                  "No deed activity loaded for this week."))
+                                  "No deed reports loaded for this week."))
+            deed_note = await _deed_freshness_note(tool)
+            if deed_note:
+                lines.append(deed_note + "\n")
         lines.append(_section("== Assessment calendar (14 days back, 45 ahead) ==", calendar,
                               "No calendar dates in this window."))
         lines.append(_VOLUME_NOTE + " Forecasts are estimates to support manager decisions, not staff assignments. "
