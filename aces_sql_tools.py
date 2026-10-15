@@ -431,6 +431,15 @@ def register_sql_tools(
         Current daily forecast of calls and walk-in visits (with 80% ranges)
         and suggested phone staffing for a date range of up to 120 days.
         Forecasts are planning estimates, not staff assignments.
+        The call forecast counts customer-facing calls (the forecast-basis
+        count: KPI-eligible inbound calls on the customer service routes), not
+        total inbound calls, which is a larger count. Call them
+        "customer-facing calls" in answers and chart titles. Never compare them
+        with inbound_calls from ACES_Office_Volume; compare with its
+        forecast_basis_calls instead.
+        The 80% range is the forecast's stated range, not a measured hit rate.
+        If asked how often actual days land inside it, use
+        ACES_Forecast_Accuracy instead of assuming 80%.
         """
         try:
             start, end = _parse_date(startDate, "startDate"), _parse_date(endDate, "endDate")
@@ -447,7 +456,9 @@ def register_sql_tools(
         """
         How accurate past forecasts were for a date range: average miss (MAE),
         bias, share of days inside the forecast range, and the simple benchmark
-        for comparison, for both calls and visits.
+        for comparison, for both calls and visits. Call figures are
+        customer-facing calls (the forecast-basis count), not total inbound
+        calls.
         """
         try:
             start, end = _parse_date(startDate, "startDate"), _parse_date(endDate, "endDate")
@@ -692,7 +703,11 @@ def register_sql_tools(
         DEED DATA GAP line, report it plainly. Call columns follow
         ACES_Office_Volume: inbound = connected + abandoned + voicemail +
         no_outcome_calls, and no_outcome_calls is listed with the other
-        outcomes. A section marked
+        outcomes. The forecast sections count customer-facing calls (the
+        forecast-basis count), while inbound_calls in the actual-volume
+        section is total inbound, a larger count: compare forecast with
+        actual only through the forecast vs actual section or
+        forecast_basis_calls, never inbound_calls. A section marked
         UNAVAILABLE failed to load; say which one, and don't estimate it. For
         detail beyond the briefing, use the individual ACES_* tools.
         """

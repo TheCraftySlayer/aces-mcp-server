@@ -170,6 +170,8 @@ def _system_prompt() -> str:
         "stalled, tell the user it didn't finish, suggest the alternative it names, and don't offer to check it again.\n"
         "- Don't offer to monitor, check back later or send updates. You only answer when someone asks.\n"
         "- For daily averages from office volume, use open_days or the avg_ columns, never calendar_days.\n"
+        "- Forecast call numbers are customer-facing calls, a smaller count than total inbound calls. Say so when "
+        "you give or chart them, and never set them beside inbound_calls as if they were the same measure.\n"
         "- For a morning briefing, or a general 'how are we looking today' question, call ACES_Daily_Briefing once "
         "instead of the separate volume, forecast, deed and calendar tools. Deed figures are volume, not backlog. "
         "If a briefing section says UNAVAILABLE, name it and don't estimate it.\n"
