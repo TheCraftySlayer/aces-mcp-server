@@ -173,6 +173,9 @@ FILE_LINK_TTL_SECONDS = int(os.getenv("ACES_FILE_LINK_TTL_SECONDS", "86400"))
 DEFAULT_POLL_SECONDS = int(os.getenv("ACES_DEFAULT_POLL_SECONDS", "60"))
 HOMEHARVEST_POLL_SECONDS = int(os.getenv("ACES_HOMEHARVEST_POLL_SECONDS", "25"))
 REPORT_GENERATION_POLL_SECONDS = int(os.getenv("ACES_REPORT_GENERATION_POLL_SECONDS", "25"))
+# A specialist task still unfinished this many minutes after it started is reported as
+# stalled (a failure), so the agent stops offering to check it and the task isn't reused.
+TASK_STALL_MINUTES = int(os.getenv("ACES_TASK_STALL_MINUTES", "5"))
 POLL_INTERVAL_SECONDS = float(os.getenv("ACES_POLL_INTERVAL_SECONDS", "3"))
 MAX_CACHED_ANSWER_CHARS = int(os.getenv("ACES_MAX_CACHED_ANSWER_CHARS", "80000"))
 
@@ -467,6 +470,18 @@ def _find_task_cache_entry(project_id: str, task_id: str) -> Tuple[Optional[str]
         if str(value.get("project_id", "")) == str(project_id) and str(value.get("task_id", "")) == str(task_id):
             return key, value
     return None, None
+
+
+def _task_age_minutes(project_id: str, task_id: str) -> Optional[float]:
+    """Minutes since the cached task was created, or None if unknown."""
+    _, entry = _find_task_cache_entry(project_id, task_id)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        created = datetime.strptime(str(entry.get("created_at") or ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - created).total_seconds() / 60.0
 
 
 def _cached_answer_for_task(project_id: str, task_id: str) -> str:
@@ -3666,6 +3681,18 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
         message_id = result.get("message_id") if isinstance(result, dict) else None
 
         if latest_status != "completed":
+            age = _task_age_minutes(project_id, task_id)
+            if age is not None and age >= TASK_STALL_MINUTES:
+                # Marked "stalled" so identical requests start a fresh task instead of reusing this one.
+                _update_task_cache_by_task_id(project_id, task_id, "stalled", latest_status=latest_status, progress_log=progress_log)
+                return (
+                    f"Task failed: it was still unfinished after {int(age)} minutes, so it is treated as stalled.\n"
+                    f"Project ID: {project_id}\n"
+                    f"Task ID: {task_id}\n"
+                    "The specialist agent didn't return an answer. Don't check this task again. "
+                    "For facts about a parcel, use the ACES_NOV or ArcGIS tools, or check iasWorld; "
+                    "otherwise ask again with a narrower question."
+                )
             _update_task_cache_by_task_id(project_id, task_id, "still_running", latest_status=latest_status, progress_log=progress_log)
             return (
                 "Task is not complete yet.\n"
@@ -4148,9 +4175,16 @@ async def Community_Educator(promptText: str) -> str:
 @mcp.tool
 async def Assessment_Context_Expert(promptText: str) -> str:
     """
-    Use for address, situs, parcel/account, owner/property lookup, PRC, OD report,
-    iasWorld export, property record card, ArcGIS public parcel pre-check, HomeHarvest, comps, sales, values,
-    exemptions on a record, record interpretation, and assessment context.
+    Slow specialist agent: often takes a minute or more and may return a Task ID.
+    Use it only for what the data tools can't give: record interpretation and
+    assessment context, a property record card, OD report or iasWorld export, or
+    comps, sales, listings and HomeHarvest market data when staff ask for them.
+    For basic facts about a specific parcel (UPC, address, owner, class, values,
+    notice details), use ACES_NOV_Search, ACES_NOV_Parcel or
+    ArcGIS_Public_Parcel_Lookup instead; they answer in about a second.
+    No A.C.E.S. tool has a parcel's exemption records. If staff ask which
+    exemptions a parcel has, don't call this tool; tell them to check the
+    exemptions tab in iasWorld.
     Takes exactly one parameter: promptText.
     """
     action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(promptText) else None
