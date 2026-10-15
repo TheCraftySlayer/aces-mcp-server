@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y curl gnupg unixodbc \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+ARG ACES_BUILD_TAG=dev
+ENV ACES_BUILD_TAG=$ACES_BUILD_TAG
 COPY . .
 ENV HOST=0.0.0.0 PORT=8000
 EXPOSE 8000

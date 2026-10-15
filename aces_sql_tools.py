@@ -383,10 +383,12 @@ def register_sql_tools(
         overflow, no_outcome), abandon rate, visits, and per-open-day averages
         that use only open days. For daily averages use the avg_ columns, never
         calendar_days. Call outcomes add up: inbound = connected + abandoned +
-        voicemail + no_outcome_calls. no_outcome_calls are inbound calls with no
-        recorded outcome (usually hang-ups in the phone menu); if asked why the
-        outcomes don't match inbound, they are the difference. Overflow calls
-        are already counted inside those outcomes, not on top of them.
+        voicemail + no_outcome_calls. Whenever you list call outcomes, include
+        no_outcome_calls (as "no recorded outcome") so the outcomes visibly add
+        up to inbound. no_outcome_calls are inbound calls with no recorded
+        outcome in the phone data; the cause isn't confirmed, so don't guess
+        one. Overflow calls are already counted inside those outcomes, not on
+        top of them.
         abandoned_pct on a closed day reflects after-hours calls, not staffed
         service, so don't present it as a service problem.
         open_days_missing_visits or days_missing_from_calendar above 0 means the
@@ -622,7 +624,8 @@ def register_sql_tools(
         for today. Deed figures are volume, not backlog: there is no certified
         backlog figure, so never describe them as one. Call columns follow
         ACES_Office_Volume: inbound = connected + abandoned + voicemail +
-        no_outcome_calls. A section marked
+        no_outcome_calls, and no_outcome_calls is listed with the other
+        outcomes. A section marked
         UNAVAILABLE failed to load; say which one, and don't estimate it. For
         detail beyond the briefing, use the individual ACES_* tools.
         """

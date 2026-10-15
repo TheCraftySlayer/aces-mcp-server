@@ -2289,6 +2289,7 @@ async def health_check(request):
         {
             "status": "healthy",
             "service": "aces-mcp-server",
+            "build": os.getenv("ACES_BUILD_TAG", "dev"),
             "mcp_endpoint": "/mcp",
             "rest_routes": [
                 "/start-lookup",
