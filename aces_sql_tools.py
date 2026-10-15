@@ -394,7 +394,15 @@ def register_sql_tools(
         open_days_missing_visits or days_missing_from_calendar above 0 means the
         data for those days is incomplete; say so. partial_days above 0 means the
         range includes today, whose counts are still coming in: totals include
-        today, but the averages leave it out. Dates are YYYY-MM-DD; range up to
+        today, but the averages leave it out. On the row that includes today,
+        latest_call_today is the time of the newest call in the data and
+        last_loaded_mt is when call data last loaded (both Mountain time). Call
+        data loads periodically during the business day, not live, so give
+        today's counts "as of" latest_call_today (for example "8 calls as of
+        8:53 AM"), never just "so far". abandoned_pct is blank for a period that
+        is only today, because a partial day's rate isn't meaningful; don't
+        work one out. If today has no row, today's calls haven't loaded yet;
+        that doesn't mean there were none. Dates are YYYY-MM-DD; range up to
         about three years.
         """
         try:
@@ -405,6 +413,10 @@ def register_sql_tools(
             "ACES_Office_Volume", "ai_api.office_volume",
             [("start_date", start), ("end_date", end), ("grain", g)],
             f"Office volume, {start} to {end}, by {g}", _VOLUME_NOTE,
+            empty=(
+                f"No call or visit data loaded between {start} and {end}. If that includes "
+                "today, today's calls may not have loaded yet; that doesn't mean there were none."
+            ),
         )
 
     async def ACES_Forecast(startDate: str, endDate: str) -> str:
