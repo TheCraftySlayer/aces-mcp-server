@@ -381,8 +381,13 @@ def register_sql_tools(
         the period), closed_day_calls (calls that arrived while the office was
         closed), call totals (inbound, connected, abandoned, voicemail,
         overflow, no_outcome), abandon rate, visits, and per-open-day averages
-        that use only open days. For daily averages use the avg_ columns, never
-        calendar_days. Call outcomes add up: inbound = connected + abandoned +
+        that divide only by open days that have data. For daily averages use
+        the avg_ columns, never calendar_days.
+        forecast_basis_calls is the call count the forecasts are built and
+        scored on, and avg_forecast_basis_calls_per_open_day is its daily
+        average. Whenever you compare actual calls with a forecast or with
+        ACES_Forecast_Accuracy, use those two columns, not inbound_calls, which
+        is a different count. Call outcomes add up: inbound = connected + abandoned +
         voicemail + no_outcome_calls. Whenever you list call outcomes, include
         no_outcome_calls (as "no recorded outcome") so the outcomes visibly add
         up to inbound. no_outcome_calls are inbound calls with no recorded
@@ -391,8 +396,10 @@ def register_sql_tools(
         top of them.
         abandoned_pct on a closed day reflects after-hours calls, not staffed
         service, so don't present it as a service problem.
-        open_days_missing_visits or days_missing_from_calendar above 0 means the
-        data for those days is incomplete; say so. partial_days above 0 means the
+        open_days_missing_calls, open_days_missing_visits or
+        days_missing_from_calendar above 0 means the data for those days is
+        incomplete; say so. Totals for that period read low, while the averages
+        use only days that have data. partial_days above 0 means the
         range includes today, whose counts are still coming in: totals include
         today, but the averages leave it out. On the row that includes today,
         latest_call_today is the time of the newest call in the data and

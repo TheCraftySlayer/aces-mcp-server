@@ -42,7 +42,7 @@ function Stop-WithMessage([string]$message) {
 
 # --- Checks -------------------------------------------------------------------
 
-foreach ($file in @("server.py", "aces_sql_tools.py", "aces_chat.py", "web_ui.html", "requirements.txt")) {
+foreach ($file in @("server.py", "aces_sql_tools.py", "aces_chat.py", "aces_charts.py", "web_ui.html", "requirements.txt")) {
     if (-not (Test-Path $file)) { Stop-WithMessage "$file is missing from $PSScriptRoot. Put this launcher in the server folder." }
 }
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {

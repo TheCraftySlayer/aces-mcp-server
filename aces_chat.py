@@ -13,6 +13,9 @@ How it works
     same shape (text, tool_use and tool_result blocks), so the browser page and
     the tool loop don't change when the provider does; only _call_model differs.
   - /chat is guarded by the same x-aces-mcp-key check as /mcp (see server.py).
+  - Build_Chart (aces_charts.py) is offered to the chat model as one more tool
+    but runs here, not through MCP. It reads values from a data tool result
+    already in the conversation, never from the model, and the browser draws it.
 
 Settings (environment variables)
   ACES_CHAT_PROVIDER         azure_openai or anthropic. Default: azure_openai when
@@ -56,6 +59,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import httpx
 from fastmcp import Client
 from starlette.responses import JSONResponse, StreamingResponse
+
+import aces_charts
 
 try:
     from zoneinfo import ZoneInfo
@@ -179,7 +184,13 @@ def _system_prompt() -> str:
         "- Write only your conclusions. Don't pose questions to yourself or show working like 'Is X included? No.' "
         "If a total excludes something, say so once, plainly.\n"
         "- If a result shows partial_days above 0, say today's counts are still coming in and that averages leave "
-        "today out. Otherwise don't speculate about partial or missing data.\n\n"
+        "today out. Otherwise don't speculate about partial or missing data.\n"
+        "- When staff ask for a chart, graph or picture of a trend, get the data with the right ACES_* tool first, then "
+        "call Build_Chart with that tool's name and the exact column names from its result. Build_Chart reads the "
+        "numbers itself; never type numbers into it. Use avg_ columns to compare periods with different numbers of "
+        "open days, a line chart for trends over time, and a bar chart for a few categories. After the chart, give the "
+        "takeaway in a sentence or two, pass along any data notes it returns, and don't repeat its numbers in a table "
+        "unless asked. If Build_Chart returns an error, say what failed.\n\n"
         "How to answer:\n"
         "- Lead with the answer. Keep it short and plain.\n"
         "- Say which tool the facts came from.\n"
@@ -547,7 +558,7 @@ def _tool_definitions(listed: List[Any]) -> List[Dict[str, Any]]:
     return tools
 
 
-async def _run_tool(client: Client, block: Dict[str, Any], emit, log) -> Dict[str, Any]:
+async def _run_tool(client: Client, block: Dict[str, Any], emit, log, full_text: Dict[str, str]) -> Dict[str, Any]:
     name = block["name"]
     tool_input = block.get("input") or {}
     await emit({"type": "tool_start", "id": block["id"], "name": name, "input": tool_input})
@@ -562,6 +573,7 @@ async def _run_tool(client: Client, block: Dict[str, Any], emit, log) -> Dict[st
         text = f"The tool call failed: {exc.__class__.__name__}: {str(exc)[:300]}"
         is_error = True
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    full_text[block["id"]] = text
     log("chat tool call", tool=name, ms=elapsed_ms, is_error=is_error, result_chars=len(text))
     await emit(
         {
@@ -581,13 +593,52 @@ async def _run_tool(client: Client, block: Dict[str, Any], emit, log) -> Dict[st
     }
 
 
+async def _run_chart_tool(block: Dict[str, Any], sources: List[Dict[str, Any]], emit, log) -> Dict[str, Any]:
+    """Build_Chart runs here, not through MCP: it needs the conversation, and it draws in the browser."""
+    tool_input = block.get("input") or {}
+    await emit({"type": "tool_start", "id": block["id"], "name": block["name"], "input": tool_input})
+    started = time.monotonic()
+    try:
+        spec, summary = aces_charts.build_chart(tool_input, sources)
+        content = aces_charts.chart_result_content(spec, summary)
+        is_error = False
+    except aces_charts.ChartError as exc:
+        summary = f"Chart not drawn: {exc}"
+        content, spec, is_error = summary, None, True
+    except Exception as exc:
+        summary = f"Chart not drawn: the chart builder failed ({exc.__class__.__name__})."
+        content, spec, is_error = summary, None, True
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if spec is not None and len(content) > MAX_TOOL_RESULT_CHARS:
+        summary = "Chart not drawn: it has too much data to keep in the conversation. Use a coarser grain or fewer series."
+        content, spec, is_error = summary, None, True
+    log(
+        "chat chart",
+        source=str(tool_input.get("sourceTool", ""))[:80],
+        ms=elapsed_ms,
+        is_error=is_error,
+        points=len(spec["x"]["values"]) if spec else 0,
+        series=len(spec["series"]) if spec else 0,
+    )
+    if spec is not None:
+        await emit({"type": "chart", "id": block["id"], "spec": spec})
+    await emit(
+        {"type": "tool_end", "id": block["id"], "name": block["name"], "is_error": is_error, "ms": elapsed_ms, "preview": summary[:PREVIEW_CHARS]}
+    )
+    return {"type": "tool_result", "tool_use_id": block["id"], "content": content, "is_error": is_error}
+
+
 async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
     conversation = list(history)
     new_messages: List[Dict[str, Any]] = []
     usage = {"input_tokens": 0, "output_tokens": 0}
 
+    full_text: Dict[str, str] = {}  # untruncated results from this request, for Build_Chart
+
     async with Client(mcp) as client:
         tools = _tool_definitions(await client.list_tools())
+        if not any(t["name"] == aces_charts.CHART_TOOL_NAME for t in tools):
+            tools.append(aces_charts.CHART_TOOL)
 
         for round_number in range(CHAT_MAX_TOOL_ROUNDS + 1):
             await emit({"type": "model"})
@@ -628,7 +679,18 @@ async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
                 await emit({"type": "reply", "text": stop_note["content"][0]["text"]})
                 break
 
-            results = await asyncio.gather(*(_run_tool(client, b, emit, log) for b in tool_uses))
+            # Data tools first, then charts, so a chart can use a result from the same round.
+            data_uses = [b for b in tool_uses if b["name"] != aces_charts.CHART_TOOL_NAME]
+            chart_uses = [b for b in tool_uses if b["name"] == aces_charts.CHART_TOOL_NAME]
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for r in await asyncio.gather(*(_run_tool(client, b, emit, log, full_text) for b in data_uses)):
+                by_id[r["tool_use_id"]] = r
+            if chart_uses:
+                pending = conversation + [{"role": "user", "content": list(by_id.values())}]
+                sources = aces_charts.collect_sources(pending, full_text)
+                for b in chart_uses:
+                    by_id[b["id"]] = await _run_chart_tool(b, sources, emit, log)
+            results = [by_id[b["id"]] for b in tool_uses]
             tool_turn = {"role": "user", "content": list(results)}
             conversation.append(tool_turn)
             new_messages.append(tool_turn)

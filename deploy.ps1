@@ -59,6 +59,8 @@ $markers = @(
     @{ File = "server.py";         Text = "ACES_BUILD_TAG" },
     @{ File = "aces_sql_tools.py"; Text = "nov_link: Optional" },
     @{ File = "aces_sql_tools.py"; Text = "no_outcome_calls" },
+    @{ File = "aces_chat.py";      Text = "import aces_charts" },
+    @{ File = "aces_charts.py";    Text = "def build_chart(" },
     @{ File = "Dockerfile";        Text = "ARG ACES_BUILD_TAG" }
 )
 foreach ($m in $markers) {
@@ -98,7 +100,7 @@ Write-Step "4. Compile"
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Stop-Deploy "python isn't on PATH. Install it, or run from the shell where start-aces.bat works."
 }
-python -m py_compile server.py aces_chat.py aces_sql_tools.py
+python -m py_compile server.py aces_chat.py aces_sql_tools.py aces_charts.py
 if ($LASTEXITCODE -ne 0) { Stop-Deploy "a Python file doesn't compile (see the error above)." }
 Write-Ok "Python files compile"
 
