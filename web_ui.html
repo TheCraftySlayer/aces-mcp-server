@@ -396,13 +396,9 @@
       <h2>Connect to start</h2>
       <p>Enter the access key for this server. The key and the conversation stay in this browser tab only and are cleared when you close it.</p>
     </div>
-    <div id="tabs" class="tabs" role="tablist" aria-label="View" hidden>
-      <button type="button" role="tab" id="tabChat" aria-selected="true" aria-controls="chatView">Chat</button>
-      <button type="button" role="tab" id="tabTools" aria-selected="false" aria-controls="toolsView">Tool console</button>
-    </div>
   </div>
 
-  <section id="chatView" class="chat" role="tabpanel" aria-labelledby="tabChat" hidden>
+  <section id="chatView" class="chat" aria-label="Chat" hidden>
     <div id="chatOff" class="chat-off" hidden></div>
     <div id="chatIntro" class="chat-intro">
       <h2>Ask about the office's data</h2>
@@ -430,31 +426,6 @@
     </form>
   </section>
 
-  <div id="toolsView" class="layout" role="tabpanel" aria-labelledby="tabTools" hidden>
-  <nav id="rail" class="rail" aria-label="Tools"></nav>
-
-  <section aria-label="Selected tool">
-    <div id="picker" class="picker" hidden>
-      <label for="toolSelect">Tool</label>
-      <select id="toolSelect"></select>
-    </div>
-
-    <div id="toolEmpty" class="empty">
-      <h2>Choose a tool</h2>
-      <p>Pick a tool from the list to see what it does, fill in its inputs, and run it directly.</p>
-    </div>
-
-    <div id="toolPane" hidden>
-      <div class="tool-head">
-        <h2 id="toolTitle"></h2>
-        <code id="toolCode"></code>
-      </div>
-      <div id="toolDesc" class="desc"></div>
-      <form id="toolForm" class="tool-form" novalidate></form>
-      <div id="result" class="result" aria-live="polite"></div>
-    </div>
-  </section>
-  </div>
 </main>
 
 <script nonce="__CSP_NONCE__">
@@ -464,40 +435,9 @@ const STORAGE_KEY = "aces_mcp_key";
 const CHAT_KEY = "aces_chat_messages";
 const CALL_TIMEOUT_MS = 200000;
 
-const GROUPS = [
-  { label: "ACES data", test: (n) => n.startsWith("ACES_") },
-  { label: "Public parcel data", test: (n) => n.startsWith("ArcGIS_") },
-  { label: "Links", test: (n) => n.startsWith("NOV_") || n.startsWith("UPC_") },
-  { label: "Specialist agents", test: () => true },
-];
-
-const FIELD_LABELS = {
-  promptText: "Request",
-  searchText: "Address, UPC, or owner",
-  maxResults: "Most results to return",
-  startDate: "Start date",
-  endDate: "End date",
-  grain: "Group by",
-  taxYear: "Tax year",
-  upc: "UPC",
-  upcs: "UPCs",
-  address: "Situs address",
-  projectId: "Project ID",
-  taskId: "Task ID",
-};
-
-const FIELD_HINTS = {
-  taxYear: "0 returns every loaded year.",
-  address: "Start of the situs address, for example 2 Lauren Taylor Ct.",
-  upc: "The UPC printed on the notice: 18 digits for real property, 6 for manufactured homes and personal property.",
-  upcs: "18-digit UPCs, separated by commas or one per line.",
-  promptText: "Ctrl+Enter runs the tool.",
-};
-
 const el = (id) => document.getElementById(id);
 let accessKey = sessionStorage.getItem(STORAGE_KEY) || "";
 let tools = [];
-let current = null;
 let rpcId = 0;
 let chatEnabled = false;
 let chatMessages = loadChat();
@@ -613,13 +553,11 @@ async function connect() {
     el("connectBtn").hidden = true;
     el("disconnectBtn").hidden = false;
     setConnState((signedInUser ? "Signed in as " + signedInUser + ". " : "Connected. ") + tools.length + " tools available.", "ok");
-    renderRail();
     chatEnabled = await checkChatEnabled();
     el("emptyState").hidden = true;
-    el("tabs").hidden = false;
     renderChatOff();
     renderChatLog();
-    showView(chatEnabled ? "chat" : "tools");
+    showChat();
   } catch (err) {
     if (err instanceof AuthError && signedInUser) {
       location.href = LOGIN_URL;
@@ -636,19 +574,11 @@ async function connect() {
 function disconnect(message) {
   accessKey = "";
   tools = [];
-  current = null;
   sessionStorage.removeItem(STORAGE_KEY);
   chatMessages = [];
   sessionStorage.removeItem(CHAT_KEY);
   el("chatLog").replaceChildren();
-  el("rail").replaceChildren();
-  el("toolSelect").replaceChildren();
-  el("picker").hidden = true;
-  el("toolPane").hidden = true;
-  el("toolEmpty").hidden = false;
-  el("tabs").hidden = true;
   el("chatView").hidden = true;
-  el("toolsView").hidden = true;
   el("emptyState").hidden = false;
   el("keyInput").closest("div").hidden = false;
   el("connectBtn").hidden = false;
@@ -656,265 +586,11 @@ function disconnect(message) {
   setConnState(message || "Not connected", message ? "bad" : "");
 }
 
-/* ---------- Tool list ---------- */
+/* ---------- Helpers used by the chat ---------- */
 
 function prettyName(name) {
   return name.replace(/^ACES_/, "").replace(/^ArcGIS_Public_/, "").replace(/_/g, " ");
 }
-
-function groupTools() {
-  const used = new Set();
-  return GROUPS.map((g) => {
-    const items = tools.filter((t) => !used.has(t.name) && g.test(t.name));
-    items.forEach((t) => used.add(t.name));
-    return { label: g.label, items };
-  }).filter((g) => g.items.length);
-}
-
-function renderRail() {
-  const rail = el("rail");
-  const select = el("toolSelect");
-  rail.replaceChildren();
-  select.replaceChildren();
-
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = "Choose a tool";
-  select.append(placeholder);
-
-  for (const group of groupTools()) {
-    const heading = document.createElement("h2");
-    heading.textContent = group.label;
-    const list = document.createElement("ul");
-    const optgroup = document.createElement("optgroup");
-    optgroup.label = group.label;
-
-    for (const tool of group.items) {
-      const li = document.createElement("li");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = prettyName(tool.name);
-      btn.dataset.tool = tool.name;
-      btn.addEventListener("click", () => selectTool(tool.name));
-      li.append(btn);
-      list.append(li);
-
-      const opt = document.createElement("option");
-      opt.value = tool.name;
-      opt.textContent = prettyName(tool.name);
-      optgroup.append(opt);
-    }
-    rail.append(heading, list);
-    select.append(optgroup);
-  }
-  el("picker").hidden = false;
-}
-
-/* ---------- Tool form ---------- */
-
-function humanize(name) {
-  if (FIELD_LABELS[name]) return FIELD_LABELS[name];
-  const words = name.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").toLowerCase();
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
-function renderDescription(text) {
-  const box = el("toolDesc");
-  box.replaceChildren();
-  const paragraphs = String(text || "").trim().split(/\n\s*\n/);
-  for (const para of paragraphs) {
-    if (!para.trim()) continue;
-    const p = document.createElement("p");
-    p.textContent = para.replace(/\s*\n\s*/g, " ");
-    box.append(p);
-  }
-}
-
-function buildField(name, schema, required) {
-  const wrap = document.createElement("div");
-  wrap.className = "field";
-  const id = "f_" + name;
-
-  const label = document.createElement("label");
-  label.htmlFor = id;
-  label.textContent = humanize(name);
-  if (required) {
-    const star = document.createElement("span");
-    star.className = "req";
-    star.textContent = "*";
-    star.setAttribute("aria-hidden", "true");
-    label.append(star);
-  }
-
-  let control;
-  const type = schema.type;
-  if (name === "promptText" || name === "upcs") {
-    control = document.createElement("textarea");
-    wrap.classList.add("wide");
-  } else if (name === "grain") {
-    control = document.createElement("select");
-    for (const value of ["day", "week", "month"]) {
-      const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = value.charAt(0).toUpperCase() + value.slice(1);
-      control.append(opt);
-    }
-    control.value = schema.default || "month";
-  } else if (/date$/i.test(name)) {
-    control = document.createElement("input");
-    control.type = "date";
-  } else if (type === "integer" || type === "number") {
-    control = document.createElement("input");
-    control.type = "number";
-    control.step = type === "integer" ? "1" : "any";
-    if (schema.default !== undefined) control.value = schema.default;
-  } else {
-    control = document.createElement("input");
-    control.type = "text";
-    if (name === "searchText" || name === "address") wrap.classList.add("wide");
-  }
-
-  control.id = id;
-  control.name = name;
-  control.dataset.type = type || "string";
-  if (required) control.required = true;
-  if (name === "promptText") {
-    control.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        el("toolForm").requestSubmit();
-      }
-    });
-  }
-
-  wrap.append(label, control);
-  if (FIELD_HINTS[name]) {
-    const hint = document.createElement("div");
-    hint.className = "hint";
-    hint.textContent = FIELD_HINTS[name];
-    wrap.append(hint);
-  }
-  return wrap;
-}
-
-function selectTool(name, presetArgs) {
-  const tool = tools.find((t) => t.name === name);
-  if (!tool) return;
-  current = tool;
-
-  document.querySelectorAll(".rail button").forEach((b) => {
-    b.setAttribute("aria-current", b.dataset.tool === name ? "true" : "false");
-  });
-  el("toolSelect").value = name;
-
-  el("toolEmpty").hidden = true;
-  el("toolPane").hidden = false;
-  el("toolTitle").textContent = prettyName(name);
-  el("toolCode").textContent = name;
-  renderDescription(tool.description);
-
-  const form = el("toolForm");
-  form.replaceChildren();
-  const schema = tool.inputSchema || {};
-  const props = schema.properties || {};
-  const required = new Set(schema.required || []);
-  for (const [field, fieldSchema] of Object.entries(props)) {
-    form.append(buildField(field, fieldSchema, required.has(field)));
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "form-actions";
-  const run = document.createElement("button");
-  run.type = "submit";
-  run.className = "btn-primary";
-  run.id = "runBtn";
-  run.textContent = "Run tool";
-  const status = document.createElement("span");
-  status.id = "runStatus";
-  status.className = "running";
-  status.hidden = true;
-  actions.append(run, status);
-  form.append(actions);
-
-  el("result").replaceChildren();
-
-  if (presetArgs) {
-    for (const [k, v] of Object.entries(presetArgs)) {
-      const input = form.elements.namedItem(k);
-      if (input) input.value = v;
-    }
-  }
-  const first = form.querySelector("input, textarea, select");
-  if (first && !presetArgs) first.focus();
-}
-
-function collectArgs() {
-  const form = el("toolForm");
-  const args = {};
-  const missing = [];
-  for (const control of form.querySelectorAll("input, textarea, select")) {
-    const raw = control.value.trim();
-    if (!raw) {
-      if (control.required) missing.push(humanize(control.name));
-      continue;
-    }
-    const type = control.dataset.type;
-    if (type === "integer") {
-      const n = Number.parseInt(raw, 10);
-      if (Number.isNaN(n)) throw new Error(humanize(control.name) + " must be a whole number.");
-      args[control.name] = n;
-    } else if (type === "number") {
-      const n = Number(raw);
-      if (Number.isNaN(n)) throw new Error(humanize(control.name) + " must be a number.");
-      args[control.name] = n;
-    } else {
-      args[control.name] = raw;
-    }
-  }
-  if (missing.length) throw new Error("Fill in " + missing.join(", ") + " before running the tool.");
-  return args;
-}
-
-async function runTool(event) {
-  event.preventDefault();
-  if (!current) return;
-
-  let args;
-  try {
-    args = collectArgs();
-  } catch (err) {
-    showProblem(err.message);
-    return;
-  }
-
-  const runBtn = el("runBtn");
-  const status = el("runStatus");
-  const started = performance.now();
-  runBtn.disabled = true;
-  status.hidden = false;
-  status.textContent = "Running";
-  const ticker = setInterval(() => {
-    status.textContent = "Running, " + Math.round((performance.now() - started) / 1000) + " s";
-  }, 500);
-  el("result").replaceChildren();
-
-  try {
-    const result = await rpc("tools/call", { name: current.name, arguments: args });
-    renderResult(result, performance.now() - started);
-  } catch (err) {
-    if (err instanceof AuthError) {
-      handleAuthFailure("The server rejected the access key. Connect again with the current key.");
-      return;
-    }
-    showProblem(err.message);
-  } finally {
-    clearInterval(ticker);
-    if (el("runBtn")) el("runBtn").disabled = false;
-    if (el("runStatus")) el("runStatus").hidden = true;
-  }
-}
-
-/* ---------- Results ---------- */
 
 function seconds(ms) {
   return ms < 10000 ? (ms / 1000).toFixed(1) + " s" : Math.round(ms / 1000) + " s";
@@ -937,200 +613,13 @@ function appendLinkified(parent, text) {
   if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
 }
 
-function parseTableLine(line) {
-  const m = /^\s*\d+\.\s+(.*\S)\s*$/.exec(line);
-  if (!m || !m[1].includes(" | ")) return null;
-  const row = {};
-  for (const part of m[1].split(" | ")) {
-    const idx = part.indexOf(": ");
-    if (idx <= 0) return null;
-    row[part.slice(0, idx).trim()] = part.slice(idx + 2).trim();
-  }
-  return row;
-}
-
-function splitBlocks(text) {
-  const blocks = [];
-  let textBuf = [];
-  let rows = [];
-  const flushText = () => {
-    const joined = textBuf.join("\n").replace(/^\n+|\n+$/g, "");
-    if (joined) blocks.push({ kind: "text", text: joined });
-    textBuf = [];
-  };
-  const flushRows = () => {
-    if (rows.length) blocks.push({ kind: "table", rows });
-    rows = [];
-  };
-  for (const line of text.split("\n")) {
-    const row = parseTableLine(line);
-    if (row) {
-      flushText();
-      rows.push(row);
-    } else {
-      flushRows();
-      textBuf.push(line);
-    }
-  }
-  flushRows();
-  flushText();
-  return blocks;
-}
-
-// One or two plain lines (a title, a row count, a source note) read better as text than as a code box.
-function isShortNote(text) {
-  const lines = text.split("\n").filter((l) => l.trim());
-  return lines.length <= 2 && text.length <= 240 && lines.every((l) => !/^\s/.test(l));
-}
-
 const isNumeric = (v) => /^-?[\d,]+(\.\d+)?%?$/.test(v);
 
-function buildTable(rows) {
-  const columns = [];
-  for (const row of rows) for (const key of Object.keys(row)) if (!columns.includes(key)) columns.push(key);
-  const numericCols = new Set(columns.filter((c) => rows.every((r) => !r[c] || isNumeric(r[c]))));
+/* ---------- Chat view ---------- */
 
-  const wrap = document.createElement("div");
-  wrap.className = "table-wrap";
-  const table = document.createElement("table");
-  const thead = document.createElement("thead");
-  const headRow = document.createElement("tr");
-  for (const c of columns) {
-    const th = document.createElement("th");
-    th.scope = "col";
-    th.textContent = c.replace(/_/g, " ");
-    if (numericCols.has(c)) th.className = "num";
-    headRow.append(th);
-  }
-  thead.append(headRow);
-  const tbody = document.createElement("tbody");
-  for (const row of rows) {
-    const tr = document.createElement("tr");
-    for (const c of columns) {
-      const td = document.createElement("td");
-      const value = row[c] === undefined ? "" : row[c];
-      if (numericCols.has(c)) td.className = "num";
-      appendLinkified(td, value);
-      tr.append(td);
-    }
-    tbody.append(tr);
-  }
-  table.append(thead, tbody);
-  wrap.append(table);
-  return { node: wrap, tsv: [columns.join("\t")].concat(rows.map((r) => columns.map((c) => r[c] || "").join("\t"))).join("\n") };
-}
-
-async function copyText(text, button) {
-  const original = button.textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    button.textContent = "Copied";
-  } catch (e) {
-    button.textContent = "Copy failed";
-  }
-  setTimeout(() => { button.textContent = original; }, 1600);
-}
-
-function makeButton(label, onClick, cls) {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = cls || "btn-quiet";
-  b.textContent = label;
-  b.addEventListener("click", onClick);
-  return b;
-}
-
-function showProblem(message) {
-  const box = el("result");
-  box.replaceChildren();
-  const err = document.createElement("div");
-  err.className = "err-box";
-  err.setAttribute("role", "alert");
-  const strong = document.createElement("strong");
-  strong.textContent = "Couldn't run the tool. ";
-  err.append(strong, document.createTextNode(message));
-  box.append(err);
-}
-
-function renderResult(result, elapsedMs) {
-  const box = el("result");
-  box.replaceChildren();
-
-  const parts = (result.content || []).filter((c) => c.type === "text").map((c) => c.text);
-  let text = parts.join("\n\n");
-  if (!text && result.structuredContent) {
-    text = typeof result.structuredContent.result === "string"
-      ? result.structuredContent.result
-      : JSON.stringify(result.structuredContent, null, 2);
-  }
-
-  const head = document.createElement("div");
-  head.className = "result-head";
-  const meta = document.createElement("span");
-  meta.className = "meta " + (result.isError ? "err" : "ok");
-  meta.textContent = (result.isError ? "The tool reported an error after " : "Finished in ") + seconds(elapsedMs);
-  head.append(meta);
-
-  if (result.isError) {
-    box.append(head);
-    const err = document.createElement("div");
-    err.className = "err-box";
-    err.setAttribute("role", "alert");
-    err.textContent = text || "The tool failed without a message.";
-    box.append(err);
-    return;
-  }
-
-  const blocks = splitBlocks(text || "The tool returned no text.");
-  const tables = [];
-  const body = document.createDocumentFragment();
-  for (const block of blocks) {
-    if (block.kind === "table") {
-      const built = buildTable(block.rows);
-      tables.push(built.tsv);
-      body.append(built.node);
-    } else if (isShortNote(block.text)) {
-      for (const line of block.text.split("\n")) {
-        if (!line.trim()) continue;
-        const p = document.createElement("p");
-        p.className = "note";
-        appendLinkified(p, line.trim());
-        body.append(p);
-      }
-    } else {
-      const pre = document.createElement("div");
-      pre.className = "text-block";
-      appendLinkified(pre, block.text);
-      body.append(pre);
-    }
-  }
-
-  if (tables.length) {
-    head.append(makeButton("Copy table", (e) => copyText(tables.join("\n\n"), e.currentTarget)));
-  }
-  head.append(makeButton("Copy text", (e) => copyText(text, e.currentTarget)));
-
-  const taskId = /^\s*Task ID:\s*(\S+)/m.exec(text);
-  const projectId = /^\s*Project ID:\s*(\S+)/m.exec(text);
-  if (taskId && projectId && tools.some((t) => t.name === "Check_CustomGPT_Task")) {
-    head.append(makeButton("Check this task", () => {
-      selectTool("Check_CustomGPT_Task", { projectId: projectId[1], taskId: taskId[1] });
-      el("toolForm").requestSubmit();
-    }, "btn-primary"));
-  }
-
-  box.append(head, body);
-}
-
-/* ---------- Views ---------- */
-
-function showView(which) {
-  const chat = which === "chat";
-  el("tabChat").setAttribute("aria-selected", String(chat));
-  el("tabTools").setAttribute("aria-selected", String(!chat));
-  el("chatView").hidden = !chat;
-  el("toolsView").hidden = chat;
-  if (chat && chatEnabled) el("chatInput").focus();
+function showChat() {
+  el("chatView").hidden = false;
+  if (chatEnabled) el("chatInput").focus();
 }
 
 async function checkChatEnabled() {
@@ -1152,7 +641,7 @@ function renderChatOff() {
   if (!chatEnabled) {
     const strong = document.createElement("strong");
     strong.textContent = "Chat is off on this server. ";
-    off.append(strong, document.createTextNode("An administrator needs to set ANTHROPIC_API_KEY and restart it. The tool console still works."));
+    off.append(strong, document.createTextNode("An administrator needs to configure the chat model on the server."));
   }
 }
 
@@ -1568,10 +1057,6 @@ el("disconnectBtn").addEventListener("click", () => {
   }
   disconnect();
 });
-el("toolForm").addEventListener("submit", runTool);
-el("toolSelect").addEventListener("change", (e) => { if (e.target.value) selectTool(e.target.value); });
-el("tabChat").addEventListener("click", () => showView("chat"));
-el("tabTools").addEventListener("click", () => showView("tools"));
 el("composer").addEventListener("submit", (e) => { e.preventDefault(); sendChat(el("chatInput").value); });
 el("chatInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
