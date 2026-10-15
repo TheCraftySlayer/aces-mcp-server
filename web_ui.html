@@ -1633,10 +1633,12 @@ document.querySelectorAll("[data-example]").forEach((b) => {
 
 // The local launcher opens /ui#key=... so you don't have to paste the key.
 // The fragment never reaches the server; it's removed from the address bar right away.
-const hashKey = new URLSearchParams(location.hash.slice(1)).get("key");
-if (hashKey) {
-  accessKey = hashKey;
-  history.replaceState(null, "", location.pathname);
+// County sign-in can also land here with #token=... (a session token). Clear any
+// fragment right away so keys and tokens don't sit in the address bar or history.
+if (location.hash) {
+  const hashKey = new URLSearchParams(location.hash.slice(1)).get("key");
+  if (hashKey) accessKey = hashKey;
+  history.replaceState(null, "", location.pathname + location.search);
 }
 
 if (signedInUser) {

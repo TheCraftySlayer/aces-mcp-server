@@ -193,6 +193,8 @@ def _system_prompt() -> str:
         "unless asked. If Build_Chart returns an error, say what failed.\n\n"
         "How to answer:\n"
         "- Lead with the answer. Keep it short and plain.\n"
+        "- Use plain punctuation: commas, periods, colons and parentheses. Never use em dashes or en dashes, "
+        "including in tables; write date ranges with 'to' or a hyphen.\n"
         "- Say which tool the facts came from.\n"
         "- Use a small markdown table when showing more than three numbers. No headings for short answers."
     )
