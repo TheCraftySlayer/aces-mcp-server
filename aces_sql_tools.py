@@ -83,9 +83,10 @@ SQL_RETRY_ATTEMPTS = max(1, int(os.getenv("ACES_SQL_RETRY_ATTEMPTS", "3")))
 MAX_ROWS = 200
 FORECAST_STALE_DAYS = max(1, int(os.getenv("ACES_FORECAST_STALE_DAYS", "2")))
 
-# Words that mark the ai_api.forecast column saying when the forecast was made. The
-# check reads the date from that column's values and skips any value that isn't a date.
-_FORECAST_MADE_HINTS = ("generated", "issued", "created", "stored", "run_at", "run_time", "made")
+# Words that mark the ai_api.forecast column saying when the forecast was made (it returns
+# as_of_date). The check reads the date from that column's values and skips any value that
+# isn't a date.
+_FORECAST_MADE_HINTS = ("as_of", "generated", "issued", "created", "stored", "run_at", "run_time", "made")
 
 TOOL_NAMES = [
     "ACES_Office_Volume",
