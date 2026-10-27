@@ -9,7 +9,8 @@
     3. Git is committed and pushed, so the image matches GitHub.
     4. The Python files compile.
     5. The server starts locally with test settings and lists every tool.
-       (This is the check that would have caught the October 15 nov_link crash.)
+       (This is the check that would have caught the October 15 crash, when server.py
+       passed an argument the copy of aces_sql_tools.py on disk didn't accept.)
   Then:
     6. Builds the image in ACR, tagged with the date and git commit.
     7. Points the web app at the new image.
@@ -27,7 +28,7 @@ param(
     [string]$App           = "aces-mcp-bernco",
     [string]$Registry      = "acesmcpbernco",
     [string]$Repo          = "aces-mcp",
-    [int]$ExpectedTools    = 20,
+    [int]$ExpectedTools    = 19,
     [int]$VerifyMinutes    = 8,
     [switch]$SkipSmokeTest,
     [switch]$AllowDirty
@@ -57,7 +58,6 @@ Write-Step "1. Code checks"
 $markers = @(
     @{ File = "server.py";         Text = "aces_sql_tools.register_sql_tools(" },
     @{ File = "server.py";         Text = "ACES_BUILD_TAG" },
-    @{ File = "aces_sql_tools.py"; Text = "nov_link: Optional" },
     @{ File = "aces_sql_tools.py"; Text = "no_outcome_calls" },
     @{ File = "aces_chat.py";      Text = "import aces_charts" },
     @{ File = "aces_charts.py";    Text = "def build_chart(" },

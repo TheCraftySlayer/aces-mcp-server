@@ -196,7 +196,6 @@ $env:SMART_TASKS_PROJECT_ID = "9262"
 $env:HOMEHARVEST_ACTION_ID  = "7"
 # Download links for generated files should point at this PC, not Render.
 $env:ACES_PUBLIC_BASE_URL   = "http://localhost:$port"
-$env:NOV_EXPLAINER_URL      = "https://func-nov-explainer-bernco.azurewebsites.net/nov"
 $env:UPC_ROUTER_URL         = "https://thecraftyslayer.github.io/upcrouter/"
 $env:HOST                   = "127.0.0.1"
 $env:PORT                   = "$port"

@@ -36,8 +36,7 @@ _SQL_TOOLS_NOTE = (
     "ACES_Forecast_Accuracy, ACES_NOV_Parcel, ACES_NOV_Search, ACES_NOV_Coverage, ACES_Deed_Volume, "
     "ACES_Assessment_Calendar, ACES_Daily_Briefing) that query the ACES database through fixed stored "
     "procedures. ACES_Daily_Briefing combines today's forecast, the last open day's results, recent deed "
-    "volume and upcoming calendar dates in one call. ACES_NOV_Parcel and ACES_NOV_Search results include "
-    "NOV Explainer links."
+    "volume and upcoming calendar dates in one call."
     if aces_sql_tools.SQL_TOOLS_ENABLED and not aces_sql_tools._config_problem()
     else ""
 )
@@ -47,10 +46,10 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes eleven tools: Community_Educator, Assessment_Context_Expert, "
+        "Exposes ten tools: Community_Educator, Assessment_Context_Expert, "
         "Clear_Expectations, Compliance_Expert, Smart_Tasks, Check_CustomGPT_Task, "
         "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, ArcGIS_Public_Candidate_Peers, "
-        "NOV_Explainer_Link, and UPC_Router_Link. "
+        "and UPC_Router_Link. "
         "The five CustomGPT specialist tools take exactly one promptText string and return plain text. "
         "Community_Educator uses CustomGPT Plan & Act task mode because project 9262 has Plan & Act enabled. "
         "Smart_Tasks submits to CustomGPT project 9262 using Plan & Act task mode for Smart Tasks, code, file, dashboard, and multi-step work. "
@@ -58,7 +57,6 @@ mcp = FastMCP(
         "ArcGIS_Public_Parcel_Lookup performs a read-only public parcel lookup. "
         "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
         "ArcGIS_Public_Candidate_Peers returns ArcGIS-only candidate parcel peers for comp triage when living area/sale data is unavailable in GIS. "
-        "NOV_Explainer_Link takes a UPC and returns a link to the staff NOV Explainer page for that account. "
         "UPC_Router_Link takes a list of UPCs and returns a link that opens the field route planner with them filled in. "
         "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
     ) + _SQL_TOOLS_NOTE,
@@ -114,13 +112,6 @@ BERNCO_EXPERIENCE_DATA_SOURCE_ID = os.getenv(
     "BERNCO_EXPERIENCE_DATA_SOURCE_ID",
     "f0093002972e4f1e823c0368ea06cf75-19e83adb259-layer-9-1",
 ).strip()
-
-# Staff NOV Explainer (Azure Function App, Entra sign-in). NOV_Explainer_Link
-# builds "<url>?upc=<UPC>" links to it. Change this when the app moves to production.
-NOV_EXPLAINER_URL = (
-    os.getenv("NOV_EXPLAINER_URL", "").strip()
-    or "https://func-nov-explainer-bernco.azurewebsites.net/nov"
-).rstrip("/")
 
 # Assessor Property Route Planner (UPC Router). UPC_Router_Link builds
 # "<url>#upcs=<UPC>,<UPC>" links; the planner fills its UPC box from the hash.
@@ -2365,7 +2356,6 @@ async def health_check(request):
             "reuse_running_homeharvest_tasks": REUSE_RUNNING_HOMEHARVEST_TASKS,
             "context_expert_file_links_enabled": CONTEXT_EXPERT_FILE_LINKS_ENABLED,
             "public_base_url": PUBLIC_BASE_URL,
-            "nov_explainer_url": NOV_EXPLAINER_URL,
             "upc_router_url": UPC_ROUTER_URL,
             "file_link_ttl_seconds": FILE_LINK_TTL_SECONDS,
             "file_link_cache_count": len(FILE_LINK_CACHE),
@@ -2388,7 +2378,6 @@ async def health_check(request):
                 "ArcGIS_Public_Parcel_Lookup",
                 "ArcGIS_Public_Parcel_Map",
                 "ArcGIS_Public_Candidate_Peers",
-                "NOV_Explainer_Link",
                 "UPC_Router_Link",
             ] + (aces_sql_tools.TOOL_NAMES if aces_sql_tools.REGISTERED else []),
         }
@@ -4333,64 +4322,6 @@ async def Check_CustomGPT_Task(projectId: str, taskId: str) -> str:
     return _specialist_result(await _check_customgpt_task_result(project_id=str(projectId).strip(), task_id=str(taskId).strip()))
 
 
-# RP UPCs are 18 digits (some RP accounts add a 2-character suffix); MH and PP are 6 digits.
-_NOV_UPC_PATTERN = re.compile(r"\d{6}|\d{18}(?:[0-9A-Z]{2})?")
-
-
-def _nov_explainer_upc(value: Any) -> str:
-    """Return a clean UPC for the NOV Explainer link, or raise ToolError with a fix."""
-    raw = str(value or "").strip()
-    upc = re.sub(r"[\s\-.]", "", raw).upper()
-    if _NOV_UPC_PATTERN.fullmatch(upc):
-        return upc
-    if re.search(r"[A-Za-z]{2,}", raw) and re.search(r"\s", raw):
-        raise ToolError(
-            "That looks like an address, not a UPC. Find the UPC first with ACES_NOV_Search "
-            "or ArcGIS_Public_Parcel_Lookup, then call NOV_Explainer_Link with it."
-        )
-    digits = len(re.sub(r"\D", "", upc))
-    raise ToolError(
-        f"'{raw[:40]}' isn't a valid UPC ({digits} digits). Real property UPCs are 18 digits "
-        "(some have a 2-character suffix); manufactured home and personal property accounts are 6 digits. "
-        "Check the number on the notice."
-    )
-
-
-def _nov_explainer_url(upc: Any) -> str:
-    """Link to the NOV Explainer card for a UPC. Raises ToolError for a bad UPC."""
-    return f"{NOV_EXPLAINER_URL}?upc={quote_plus(_nov_explainer_upc(upc))}"
-
-
-def _nov_explainer_url_or_empty(upc: Any) -> str:
-    """Same link, or "" when the UPC doesn't fit. Used to add links to ACES_NOV_* results."""
-    try:
-        return _nov_explainer_url(upc)
-    except ToolError:
-        return ""
-
-
-@mcp.tool
-async def NOV_Explainer_Link(upc: str) -> str:
-    """
-    Use when staff want to open, view, print or share the Notice of Value
-    explanation for an account. Returns a link to the staff NOV Explainer page
-    for that UPC (county sign-in required). Takes the UPC printed on the notice:
-    18 digits for real property (some have a 2-character suffix), 6 digits for
-    manufactured homes and business personal property. Does not look anything
-    up; for an address, get the UPC from ACES_NOV_Search or
-    ArcGIS_Public_Parcel_Lookup first.
-    """
-    clean = _nov_explainer_upc(upc)
-    url = _nov_explainer_url(clean)
-    _log("NOV_Explainer_Link invoked", upc_length=len(clean))
-    return (
-        f"NOV Explainer link for UPC {clean}:\n"
-        f"{url}\n\n"
-        "Opens the staff NOV Explainer (county sign-in required). This tool only builds the link; "
-        "if the account isn't in the latest ACES load, the page will say so."
-    )
-
-
 def _count(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
 
@@ -4493,7 +4424,6 @@ aces_sql_tools.register_sql_tools(
     log=_log,
     require_rest_auth=_require_rest_auth,
     normalize_address=_normalize_arcgis_situs_from_user_text,
-    nov_link=_nov_explainer_url_or_empty,
 )
 
 # One-conversation chat over these tools (Azure OpenAI or the Anthropic API; see aces_chat.py). Off until a provider is configured.

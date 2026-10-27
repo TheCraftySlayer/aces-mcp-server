@@ -15,8 +15,6 @@ Design rules
   - The database login can only EXECUTE ai_api procedures. It has no SELECT
     on any table or view, and every call is logged inside the procedure.
   - No exemptions, staff data, phone numbers, or free-form SQL.
-  - ACES_NOV_Parcel and ACES_NOV_Search add NOV Explainer links when server.py
-    passes a link builder (nov_link). Links are built here, not read from SQL.
 
 Settings (environment variables)
   ACES_SQL_TOOLS_ENABLED   true to register the tools (default false)
@@ -404,7 +402,6 @@ def register_sql_tools(
     log: Callable[..., None],
     require_rest_auth: Callable[[Any], Optional[JSONResponse]],
     normalize_address: Optional[Callable[[str], str]] = None,
-    nov_link: Optional[Callable[[str], str]] = None,
 ) -> bool:
     """Register the data tools and the /data-tool REST route. Returns True if registered."""
     global REGISTERED
@@ -418,23 +415,6 @@ def register_sql_tools(
         log("SQL data tools NOT registered - missing settings", missing=missing)
         return False
 
-    def _link_for(upc: Any) -> str:
-        """NOV Explainer link for a UPC, or "" when links are off or the UPC doesn't fit."""
-        if nov_link is None or upc in (None, ""):
-            return ""
-        try:
-            return nov_link(str(upc)) or ""
-        except Exception:
-            return ""
-
-    def _add_link_column(columns: List[str], rows: List[List[Any]]) -> Tuple[List[str], List[List[Any]]]:
-        """Add a nov_explainer column built from the result's UPC column, if it has one."""
-        lowered = [str(c).strip().lower() for c in columns]
-        idx = next((lowered.index(n) for n in ("upc", "account", "parid") if n in lowered), None)
-        if nov_link is None or idx is None:
-            return columns, rows
-        return columns + ["nov_explainer"], [list(r) + [_link_for(r[idx])] for r in rows]
-
     async def _call(
         tool: str,
         proc: str,
@@ -442,8 +422,6 @@ def register_sql_tools(
         title: str,
         note: str,
         empty: str = "",
-        link_rows: bool = False,
-        link_upc: str = "",
         lead: Optional[Callable[[List[str], List[List[Any]]], str]] = None,
     ) -> str:
         try:
@@ -455,15 +433,10 @@ def register_sql_tools(
             log("SQL data tool failed", tool=tool, proc=proc, error=str(exc)[:500])
             raise ToolError(f"{_ERROR_PREFIX} {_clean_sql_error(exc)}")
         log("SQL data tool ok", tool=tool, proc=proc, rows=len(rows))
-        if link_rows and rows:
-            columns, rows = _add_link_column(columns, rows)
         text = _format_rows(title, columns, rows, note, empty)
         first = lead(columns, rows) if (lead is not None and rows) else ""
         if first:
             text = f"{first}\n\n{text}"
-        link = _link_for(link_upc) if (link_upc and rows) else ""
-        if link:
-            text += f"\nNOV Explainer (county sign-in required): {link}"
         return text
 
     def _bad_input(exc: Exception) -> str:
@@ -611,9 +584,8 @@ def register_sql_tools(
         the notice): situs address, class, notice land, buildings, full value on
         the notice, value history, 3% limit amount, taxable value, the reason the
         value changed, mailing date, and transfer/permit years. taxYear 0 returns
-        all loaded years. Does not include exemptions. Also returns a link to the
-        staff NOV Explainer page for the account. For an address, find the UPC
-        with ACES_NOV_Search first. Percent-change fields are fractions (0.03
+        all loaded years. Does not include exemptions. For an address, find the
+        UPC with ACES_NOV_Search first. Percent-change fields are fractions (0.03
         means 3 percent); state them as percents. Explain a code (land use,
         reason) only if this result includes its meaning; otherwise give the
         code as is. Say to verify values in iasWorld before official use.
@@ -626,7 +598,6 @@ def register_sql_tools(
             "ACES_NOV_Parcel", "ai_api.nov_parcel",
             [("upc", clean_upc), ("tax_year", year)],
             f"Notice of Value, UPC {clean_upc}", _DATA_NOTE,
-            link_upc=clean_upc,
             empty=(
                 f"No notice data found for UPC {clean_upc}"
                 + (f" in tax year {year}" if year else " in any loaded tax year")
@@ -638,8 +609,8 @@ def register_sql_tools(
         """
         Find accounts by the start of the situs (street) address, for example
         "2 Lauren Taylor Ct". City and ZIP are ignored. Returns up to 10 matches
-        with UPC, roll type, class and a NOV Explainer link for each. Does not
-        take a UPC; for a UPC use ACES_NOV_Parcel directly.
+        with UPC, roll type and class for each. Does not take a UPC; for a UPC
+        use ACES_NOV_Parcel directly.
         """
         raw = str(address or "").strip()
         if _looks_like_upc(raw):
@@ -664,7 +635,6 @@ def register_sql_tools(
             "ACES_NOV_Search", "ai_api.nov_search",
             [("address", search), ("tax_year", year)],
             f"Accounts matching '{search}'", _DATA_NOTE,
-            link_rows=True,
             empty=(
                 f"No accounts have a situs address starting with '{search}'. "
                 "Check the house number and street spelling, and use the street "
@@ -993,6 +963,5 @@ def register_sql_tools(
         trust_server_certificate=SQL_TRUST_SERVER_CERT,
         tools=len(tools),
         retry_attempts=SQL_RETRY_ATTEMPTS,
-        nov_links=nov_link is not None,
     )
     return True
