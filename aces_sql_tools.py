@@ -20,13 +20,24 @@ Design rules
 
 Settings (environment variables)
   ACES_SQL_TOOLS_ENABLED   true to register the tools (default false)
-  ACES_SQL_SERVER          e.g. test-aces2.database.windows.net
-  ACES_SQL_DATABASE        default ACES_Test
-  ACES_SQL_AUTH            ActiveDirectoryServicePrincipal (default), ActiveDirectoryMsi, or SqlPassword
+  ACES_SQL_SERVER          e.g. test-aces2.database.windows.net (Azure), asbcdbbernt (county
+                           on-prem), or HOST\\INSTANCE for a named instance
+  ACES_SQL_PORT            default 1433. Ignored when ACES_SQL_SERVER names an instance
+                           (HOST\\INSTANCE) or already includes a port (HOST,PORT).
+  ACES_SQL_DATABASE        default ACES_Test (ASRCustomerService on the county server)
+  ACES_SQL_AUTH            ActiveDirectoryServicePrincipal (default), ActiveDirectoryMsi,
+                           SqlPassword, or Windows
+                             Windows: signs in as the Windows account the server runs under
+                             (for a service account on a county Windows server). No user name
+                             or password is stored or sent.
   ACES_SQL_USER            app (client) ID for the service principal, or the SQL user name.
                            With ActiveDirectoryMsi: leave blank for a system-assigned identity,
-                           or set the client ID of a user-assigned identity.
-  ACES_SQL_PASSWORD        client secret, or the SQL user password (not used with ActiveDirectoryMsi)
+                           or set the client ID of a user-assigned identity. Not used with Windows.
+  ACES_SQL_PASSWORD        client secret, or the SQL user password (not used with ActiveDirectoryMsi
+                           or Windows)
+  ACES_SQL_TRUST_SERVER_CERT  default false. true accepts the server's certificate without checking
+                           who issued it. Only for a county server with a self-signed certificate;
+                           never for Azure. Traffic is still encrypted.
   ACES_SQL_DRIVER          default "ODBC Driver 18 for SQL Server"
   ACES_SQL_TIMEOUT_SECONDS default 30
   ACES_SQL_RETRY_ATTEMPTS  default 3 (connection drops and timeouts only)
@@ -61,6 +72,8 @@ SQL_DATABASE = os.getenv("ACES_SQL_DATABASE", "ACES_Test").strip()
 SQL_AUTH = os.getenv("ACES_SQL_AUTH", "ActiveDirectoryServicePrincipal").strip()
 SQL_USER = os.getenv("ACES_SQL_USER", "").strip()
 SQL_PASSWORD = os.getenv("ACES_SQL_PASSWORD", "").strip()
+SQL_PORT = os.getenv("ACES_SQL_PORT", "1433").strip()
+SQL_TRUST_SERVER_CERT = _env_flag("ACES_SQL_TRUST_SERVER_CERT", "false")
 SQL_DRIVER = os.getenv("ACES_SQL_DRIVER", "ODBC Driver 18 for SQL Server").strip()
 SQL_TIMEOUT_SECONDS = int(os.getenv("ACES_SQL_TIMEOUT_SECONDS", "30"))
 SQL_RETRY_ATTEMPTS = max(1, int(os.getenv("ACES_SQL_RETRY_ATTEMPTS", "3")))
@@ -124,15 +137,41 @@ def _uses_managed_identity() -> bool:
     return SQL_AUTH.lower() in {"activedirectorymsi", "activedirectorymanagedidentity"}
 
 
+def _uses_windows_auth() -> bool:
+    """Windows sign-in as the account this process runs under (SQL Server on a county server)."""
+    return SQL_AUTH.lower() in {"windows", "integrated", "sspi", "trusted"}
+
+
+def _uses_sql_password() -> bool:
+    return SQL_AUTH.lower() in {"sqlpassword", "sql"}
+
+
+def _server_value() -> str:
+    """
+    tcp:HOST,PORT for a plain host name (Azure and the county default instance).
+    A named instance (HOST\\INSTANCE) or an explicit HOST,PORT is used as given, since
+    adding ,1433 to a named instance points at the wrong port.
+    """
+    server = SQL_SERVER
+    if "\\" in server or "," in server:
+        return server
+    host = server[4:] if server.lower().startswith("tcp:") else server
+    return f"tcp:{host},{SQL_PORT}" if SQL_PORT else f"tcp:{host}"
+
+
 def _connection_string() -> str:
     parts = [
         f"Driver={_odbc_value(SQL_DRIVER)}",
-        f"Server=tcp:{SQL_SERVER},1433",
+        f"Server={_server_value()}",
         f"Database={_odbc_value(SQL_DATABASE)}",
         "Encrypt=yes",
-        "TrustServerCertificate=no",
+        "TrustServerCertificate=" + ("yes" if SQL_TRUST_SERVER_CERT else "no"),
         f"Connection Timeout={SQL_TIMEOUT_SECONDS}",
     ]
+    if _uses_windows_auth():
+        # The Windows account running the server signs in. Nothing secret is stored or sent.
+        parts.append("Trusted_Connection=yes")
+        return ";".join(parts) + ";"
     if _uses_managed_identity():
         # Azure supplies the token. UID is only for a user-assigned identity; never send a PWD.
         if SQL_USER:
@@ -140,14 +179,14 @@ def _connection_string() -> str:
     else:
         parts.append(f"UID={_odbc_value(SQL_USER)}")
         parts.append(f"PWD={_odbc_value(SQL_PASSWORD)}")
-    if SQL_AUTH.lower() not in {"sqlpassword", "sql"}:
+    if not _uses_sql_password():
         parts.append(f"Authentication={SQL_AUTH}")
     return ";".join(parts) + ";"
 
 
 def _config_problem() -> str:
     required = [("ACES_SQL_SERVER", SQL_SERVER)]
-    if not _uses_managed_identity():
+    if not (_uses_managed_identity() or _uses_windows_auth()):
         required += [("ACES_SQL_USER", SQL_USER), ("ACES_SQL_PASSWORD", SQL_PASSWORD)]
     missing = [name for name, value in required if not value]
     return ", ".join(missing)
@@ -212,6 +251,8 @@ def _clean_sql_error(exc: Exception) -> str:
         return "The database driver is not installed on this server."
     if "Login timeout" in text or "TCP Provider" in text or "Cannot open server" in text:
         return "The database server could not be reached."
+    if "certificate" in text.lower() and ("SSL" in text or "trust" in text.lower()):
+        return "The database server's certificate isn't trusted by this machine."
     if "Login failed" in text or "AADSTS" in text:
         return "Database sign-in failed."
     match = re.search(r"\[SQL Server\]([^\[]+?)(?:\s*\(\d+\)\s*\(SQL\w+\))", text)
@@ -848,6 +889,7 @@ def register_sql_tools(
         server=SQL_SERVER,
         database=SQL_DATABASE,
         auth=SQL_AUTH,
+        trust_server_certificate=SQL_TRUST_SERVER_CERT,
         tools=len(tools),
         retry_attempts=SQL_RETRY_ATTEMPTS,
         nov_links=nov_link is not None,

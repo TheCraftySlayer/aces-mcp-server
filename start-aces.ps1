@@ -1,13 +1,24 @@
 # Starts the A.C.E.S. server on this PC and opens the chat in your browser.
-# Run it through start-aces.bat. "start-aces.bat reset" re-enters the saved secrets.
+# Run it through start-aces.bat.
+#   start-aces.bat           uses the Azure ACES_Test database
+#   start-aces.bat onprem    uses the county database (ASRCustomerService on asbcdbbernt)
+#   add "reset" to either one to re-enter the saved secrets
 
-param([string]$Mode = "")
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Options = @())
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
 $port = 10000
 $secretFile = Join-Path $env:LOCALAPPDATA "ACES\local-secrets.xml"
+
+# County on-prem database, used with "start-aces.bat onprem".
+# ASR_CS_User can read and change every table. That's acceptable for a test on this PC,
+# since the server only calls ai_api procedures, but use a login limited to EXECUTE on
+# ai_api before this runs anywhere around the clock.
+$onPremSqlServer   = "asbcdbbernt"
+$onPremSqlDatabase = "ASRCustomerService"
+$onPremSqlUser     = "ASR_CS_User"
 
 function New-RandomKey {
     $bytes = New-Object byte[] 24
@@ -40,6 +51,16 @@ function Stop-WithMessage([string]$message) {
     exit 1
 }
 
+# --- Options ------------------------------------------------------------------
+
+$reset   = $Options -contains "reset"
+$onPrem  = $Options -contains "onprem"
+$unknown = @($Options | Where-Object { $_ -and ($_ -notin @("reset", "onprem")) })
+if ($unknown.Count -gt 0) {
+    Stop-WithMessage "Unknown option: $($unknown -join ', '). Use onprem, reset, or both."
+}
+$target = if ($onPrem) { "county on-prem ($onPremSqlDatabase on $onPremSqlServer)" } else { "Azure (ACES_Test on test-aces2)" }
+
 # --- Checks -------------------------------------------------------------------
 
 foreach ($file in @("server.py", "aces_sql_tools.py", "aces_chat.py", "aces_charts.py", "web_ui.html", "requirements.txt")) {
@@ -54,16 +75,20 @@ if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyCon
 
 # --- Secrets: saved once, encrypted so only your Windows account on this PC can read them ---
 
-if ($Mode -eq "reset" -and (Test-Path $secretFile)) {
+if ($reset -and (Test-Path $secretFile)) {
     Remove-Item $secretFile
     Write-Host "Saved secrets cleared."
 }
 
-$prompts = [ordered]@{
-    AzureSecret    = "Azure client secret for aces-mcp-sql"
-    AnthropicKey   = "Anthropic API key (Enter to skip; chat stays off)"
-    CustomGptToken = "CustomGPT API token (Enter to skip; specialist agents stay off)"
+# Only the database secret for the chosen target is asked for.
+$prompts = [ordered]@{}
+if ($onPrem) {
+    $prompts["OnPremSqlPassword"] = "Password for $onPremSqlUser on $onPremSqlServer"
+} else {
+    $prompts["AzureSecret"] = "Azure client secret for aces-mcp-sql"
 }
+$prompts["AnthropicKey"]   = "Anthropic API key (Enter to skip; chat stays off)"
+$prompts["CustomGptToken"] = "CustomGPT API token (Enter to skip; specialist agents stay off)"
 
 $saved = $null
 if (Test-Path $secretFile) { $saved = Import-Clixml $secretFile }
@@ -137,10 +162,24 @@ $mcpKey = New-RandomKey
 $env:ACES_MCP_API_KEY       = $mcpKey
 $env:ACES_ADMIN_TOKEN       = New-RandomKey
 $env:ACES_SQL_TOOLS_ENABLED = "true"
-$env:ACES_SQL_SERVER        = "test-aces2.database.windows.net"
-$env:ACES_SQL_DATABASE      = "ACES_Test"
-$env:ACES_SQL_USER          = "94fcfdcb-1350-47d9-84a2-b9e1d246f74a"
-$env:ACES_SQL_PASSWORD      = ConvertTo-Plain $saved.AzureSecret
+# Every SQL setting is set for both targets so nothing left over in this window carries across.
+if ($onPrem) {
+    # The county server uses a self-signed certificate, so the certificate check is relaxed.
+    # The connection is still encrypted.
+    $env:ACES_SQL_SERVER            = $onPremSqlServer
+    $env:ACES_SQL_DATABASE          = $onPremSqlDatabase
+    $env:ACES_SQL_AUTH              = "SqlPassword"
+    $env:ACES_SQL_USER              = $onPremSqlUser
+    $env:ACES_SQL_PASSWORD          = ConvertTo-Plain $saved.OnPremSqlPassword
+    $env:ACES_SQL_TRUST_SERVER_CERT = "true"
+} else {
+    $env:ACES_SQL_SERVER            = "test-aces2.database.windows.net"
+    $env:ACES_SQL_DATABASE          = "ACES_Test"
+    $env:ACES_SQL_AUTH              = "ActiveDirectoryServicePrincipal"
+    $env:ACES_SQL_USER              = "94fcfdcb-1350-47d9-84a2-b9e1d246f74a"
+    $env:ACES_SQL_PASSWORD          = ConvertTo-Plain $saved.AzureSecret
+    $env:ACES_SQL_TRUST_SERVER_CERT = "false"
+}
 $env:ANTHROPIC_API_KEY      = ConvertTo-Plain $saved.AnthropicKey
 # Only needed if your Anthropic key isn't tied to one workspace. Put the ID in .env once as
 #   ACES_ANTHROPIC_WORKSPACE_ID=wrkspc_...
@@ -166,7 +205,8 @@ $env:PORT                   = "$port"
 
 # Double any apostrophes so a folder like "Assessor's Office" doesn't break the quoted path.
 $quotedRoot = $PSScriptRoot -replace "'", "''"
-$serverCommand = "Set-Location -LiteralPath '$quotedRoot'; `$host.UI.RawUI.WindowTitle = 'A.C.E.S. server (close to stop)'; python server.py"
+$windowTitle = if ($onPrem) { "A.C.E.S. server, county database (close to stop)" } else { "A.C.E.S. server (close to stop)" }
+$serverCommand = "Set-Location -LiteralPath '$quotedRoot'; `$host.UI.RawUI.WindowTitle = '$windowTitle'; python server.py"
 Start-Process powershell -ArgumentList '-NoExit', '-Command', $serverCommand | Out-Null
 
 # The secrets now live only in the server window's process.
@@ -190,6 +230,7 @@ if ($null -eq $health) {
 Write-Host ""
 Write-Host "Server is running." -ForegroundColor Green
 Write-Host ("  SQL tools: " + $(if ($health.sql_tools_registered) { "on" } else { "off" }))
+Write-Host ("  Database:  " + $target)
 Write-Host ("  Chat:      " + $(if ($health.chat_enabled) { "on ($($health.chat_model))" } else { "off (no Anthropic key saved)" }))
 Write-Host ("  Workspace: " + $(if ($health.chat_workspace_set) { $env:ACES_ANTHROPIC_WORKSPACE_ID } else { "none set (chat needs one unless your Anthropic key was made inside a workspace)" }))
 Write-Host ""
