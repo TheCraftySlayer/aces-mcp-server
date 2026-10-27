@@ -283,6 +283,15 @@ def _parse_grain(value: Any) -> str:
     return grain
 
 
+def _whole_weeks(start: date, grain: str) -> Tuple[date, str]:
+    """With grain week, move the start back to that week's Monday so the first week is whole.
+    Returns the start to use and a note for the result title ('' when nothing moved)."""
+    if grain != "week" or start.weekday() == 0:
+        return start, ""
+    monday = start - timedelta(days=start.weekday())
+    return monday, f" (start moved back to Monday {monday} so every week is whole)"
+
+
 def _parse_tax_year(value: Any) -> Optional[int]:
     if value in (None, "", 0, "0"):
         return None
@@ -451,16 +460,25 @@ def register_sql_tools(
         is only today, because a partial day's rate isn't meaningful; don't
         work one out. If today has no row, today's calls haven't loaded yet;
         that doesn't mean there were none. Dates are YYYY-MM-DD; range up to
-        about three years.
+        about three years. With grain week the start moves back to that week's
+        Monday, so every week is whole.
+        A week that isn't whole (the current week, or one cut off by endDate)
+        isn't comparable with full weeks: Mondays run highest, so a week that is
+        mostly Monday reads high. Don't describe a partial week as a rise or a
+        fall; compare the same weekdays, or leave it out of the trend.
+        Call counts from 2026-08-20 on follow the current classification;
+        earlier days count roughly 4% fewer customer-facing calls. A step at
+        2026-08-20 is a counting change, not a change in demand.
         """
         try:
             start, end, g = _parse_date(startDate, "startDate"), _parse_date(endDate, "endDate"), _parse_grain(grain)
         except ValueError as exc:
             return _bad_input(exc)
+        start, moved = _whole_weeks(start, g)
         return await _call(
             "ACES_Office_Volume", "ai_api.office_volume",
             [("start_date", start), ("end_date", end), ("grain", g)],
-            f"Office volume, {start} to {end}, by {g}", _VOLUME_NOTE,
+            f"Office volume, {start} to {end}, by {g}{moved}", _VOLUME_NOTE,
             empty=(
                 f"No call or visit data loaded between {start} and {end}. If that includes "
                 "today, today's calls may not have loaded yet; that doesn't mean there were none."
@@ -641,16 +659,18 @@ def register_sql_tools(
         one from them.
         The result ends with how current the deed data is. If it says DEED DATA
         GAP, lead with that: missing days mean the reports weren't loaded, not
-        that there was no activity.
+        that there was no activity. With grain week the start moves back to
+        that week's Monday, so every week is whole.
         """
         try:
             start, end, g = _parse_date(startDate, "startDate"), _parse_date(endDate, "endDate"), _parse_grain(grain)
         except ValueError as exc:
             return _bad_input(exc)
+        start, moved = _whole_weeks(start, g)
         result = await _call(
             "ACES_Deed_Volume", "ai_api.deed_volume",
             [("start_date", start), ("end_date", end), ("grain", g)],
-            f"Deed volume, {start} to {end}, by {g}", _VOLUME_NOTE,
+            f"Deed volume, {start} to {end}, by {g}{moved}", _VOLUME_NOTE,
         )
         note = await _deed_freshness_note("ACES_Deed_Volume")
         return f"{result}\n{note}" if note else result
