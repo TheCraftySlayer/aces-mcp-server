@@ -1301,12 +1301,24 @@ function addChart(spec) {
   const save = document.createElement("button");
   save.type = "button";
   save.textContent = "Save image";
-  save.addEventListener("click", () => saveChartImage(spec, save, showValues));
-  actions.append(toggle, save);
+  // A forecast chart can carry two ranges (80% and 95%); the button swaps which one is shaded.
+  let band = spec.band;
+  const view = () => (band === spec.band ? spec : Object.assign({}, spec, { band }));
+  const rangeName = (b) => ((b.label.match(/\d+%/) || [""])[0] + " range").trim();
+  let rangeBtn = null;
+  if (spec.band && spec.bandAlt) {
+    rangeBtn = document.createElement("button");
+    rangeBtn.type = "button";
+    rangeBtn.textContent = "Show " + rangeName(spec.bandAlt);
+    rangeBtn.setAttribute("aria-pressed", "false");
+  }
+  save.addEventListener("click", () => saveChartImage(view(), save, showValues));
+  actions.append(...[toggle, rangeBtn, save].filter(Boolean));
   head.append(title, actions);
   fig.append(head);
 
   const isBar = spec.type === "bar";
+  let bandKey = null;
   if (spec.series.length > 1 || spec.band || spec.closed) {
     const legend = document.createElement("ul");
     legend.className = "chart-legend";
@@ -1314,11 +1326,13 @@ function addChart(spec) {
       const li = document.createElement("li");
       const sw = document.createElement("span");
       sw.className = "key " + cls;
-      li.append(sw, document.createTextNode(text));
+      const label = document.createTextNode(text);
+      li.append(sw, label);
       legend.append(li);
+      return label;
     };
     spec.series.forEach((s, k) => key(s.label, (isBar ? "bar " : "") + "k" + (k + 1)));
-    if (spec.band) key(spec.band.label, "band k1");
+    if (spec.band) bandKey = key(spec.band.label, "band k1");
     if (spec.closed) key("Office closed", "closed");
     fig.append(legend);
   }
@@ -1350,12 +1364,17 @@ function addChart(spec) {
   details.addEventListener("toggle", () => {
     if (!details.open || details.querySelector(".table-wrap")) return;
     const header = [spec.x.label].concat(spec.series.map((s) => s.label));
-    if (spec.band) header.push("Range low", "Range high");
+    const bands = [spec.band, spec.bandAlt].filter(Boolean);
+    const named = bands.length > 1;
+    for (const b of bands) {
+      const name = named ? rangeName(b) : "Range";
+      header.push(name + " low", name + " high");
+    }
     const digits = spec.series.map((s) => dataDigits(s.values));
-    const bandDigits = spec.band ? dataDigits(spec.band.low.concat(spec.band.high)) : 0;
+    const bandDigits = bands.map((b) => dataDigits(b.low.concat(b.high)));
     const rows = spec.x.values.map((x, i) => {
       const r = [spec.closed && spec.closed[i] ? x + " (closed)" : x].concat(spec.series.map((s, k) => fmtNum(s.values[i], digits[k], true)));
-      if (spec.band) r.push(fmtNum(spec.band.low[i], bandDigits, true), fmtNum(spec.band.high[i], bandDigits, true));
+      bands.forEach((b, k) => r.push(fmtNum(b.low[i], bandDigits[k], true), fmtNum(b.high[i], bandDigits[k], true)));
       return r;
     });
     details.append(markdownTable(header, rows));
@@ -1366,7 +1385,7 @@ function addChart(spec) {
 
   let drawnWidth = 0;
   const render = (w) => {
-    const svg = drawChartSvg(spec, w, false, showValues);
+    const svg = drawChartSvg(view(), w, false, showValues);
     plot.replaceChildren(svg);
     // Only offer the toggle when values fit at this width.
     toggle.hidden = svg.dataset.valuesFit !== "1";
@@ -1383,6 +1402,16 @@ function addChart(spec) {
     toggle.setAttribute("aria-pressed", String(showValues));
     if (drawnWidth) render(drawnWidth);
   });
+  if (rangeBtn) {
+    rangeBtn.addEventListener("click", () => {
+      const other = band === spec.band ? spec.bandAlt : spec.band;
+      rangeBtn.textContent = "Show " + rangeName(band);
+      rangeBtn.setAttribute("aria-pressed", String(other === spec.bandAlt));
+      band = other;
+      if (bandKey) bandKey.textContent = band.label;
+      if (drawnWidth) render(drawnWidth);
+    });
+  }
   draw();
   if (window.ResizeObserver) new ResizeObserver(draw).observe(plot);
   return fig;

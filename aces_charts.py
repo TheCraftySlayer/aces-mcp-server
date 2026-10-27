@@ -56,8 +56,9 @@ CHART_TOOL: Dict[str, Any] = {
         "from that result; you never pass numbers. One chart uses one result, so it can't put two tools' results "
         "(such as actual calls and a forecast) on the same chart; draw two charts instead. Use avg_ columns to compare periods that have different "
         "numbers of open days. Line charts suit trends over time (up to 200 points); bar charts suit up to 40 "
-        "categories. For a forecast, put the forecast column in y and its low and high range columns in "
-        "rangeLow and rangeHigh. Returns a short summary and any data notes, which you must pass along."
+        "categories. For a forecast, put the forecast column in y and its 80% low and high columns in "
+        "rangeLow and rangeHigh; if the result also has the 95% columns, the chart adds a button to switch "
+        "ranges, so draw it once. Returns a short summary and any data notes, which you must pass along."
     ),
     "input_schema": {
         "type": "object",
@@ -340,6 +341,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         series.append({"label": label, "column": original.get(col, col), "values": values})
 
     band = None
+    band_alt = None
     if low_col:
         if chart_type != "line":
             raise ChartError("A shaded range only works on a line chart.")
@@ -348,6 +350,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
             if lo is not None and hi is not None and lo > hi:
                 raise ChartError(f"Row {n} has {low_col} above {high_col}; check the column order.")
         band = {"low": low, "high": high, "label": _clip(args.get("rangeLabel"), MAX_LABEL_CHARS) or "Range"}
+        band_alt = _alternate_band(rows, low_col, high_col, band["label"], column_values)
 
     notes: List[str] = []
     if "partial_days" in rows[0]:
@@ -408,6 +411,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         "yLabel": _clip(args.get("yLabel"), MAX_LABEL_CHARS),
         "series": series,
         "band": band,
+        "bandAlt": band_alt,
         "closed": closed,
         "notes": notes,
         "source": (f"{table['title']} ({source_name})" if table["title"] else source_name)[:240],
@@ -424,12 +428,41 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
             f"{', '.join(s['column'] for s in series)} by {spec['x']['label'].lower()}, {len(rows)} points, "
             f"read directly from the {source_name} result ({table['title']})."
         )
+    if band_alt:
+        summary += (
+            f" A button on the chart switches the shaded range between the {band['label']} and the "
+            f"{band_alt['label']}; the user can use it, so don't redraw the chart for the other range."
+        )
     if closed:
         summary += f" Days or periods when the office was closed ({sum(closed)}) are shaded on the chart and labeled Closed."
     if notes:
         summary += " Data notes to pass along: " + " ".join(notes)
     summary += " The chart is on screen; give the takeaway in a sentence or two rather than repeating its numbers."
     return spec, summary
+
+
+# Forecast ranges that can be swapped on the chart: calls_low80/calls_high80 <-> calls_low95/calls_high95.
+_RANGE_LEVELS = ("80", "95")
+
+
+def _alternate_band(rows, low_col, high_col, label, column_values) -> Optional[Dict[str, Any]]:
+    """The other forecast range (95% for an 80% band, or 80% for a 95% band) when the result has it, else None."""
+    for have, other in (_RANGE_LEVELS, _RANGE_LEVELS[::-1]):
+        if have in low_col and have in high_col:
+            alt_low, alt_high = low_col.replace(have, other), high_col.replace(have, other)
+            break
+    else:
+        return None
+    if alt_low not in rows[0] or alt_high not in rows[0]:
+        return None
+    try:
+        low, high = column_values(alt_low), column_values(alt_high)
+    except ChartError:
+        return None
+    if all(v is None for v in low) or any(lo is not None and hi is not None and lo > hi for lo, hi in zip(low, high)):
+        return None
+    alt_label = label.replace(have + "%", other + "%") if have + "%" in label else f"{other}% range"
+    return {"low": low, "high": high, "label": alt_label}
 
 
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]

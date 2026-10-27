@@ -560,7 +560,9 @@ def register_sql_tools(
         forecast_basis_calls instead.
         The 80% range is the forecast's stated range, not a measured hit rate.
         If asked how often actual days land inside it, use
-        ACES_Forecast_Accuracy instead of assuming 80%.
+        ACES_Forecast_Accuracy instead of assuming 80%. When the result also
+        has calls_low95/calls_high95 and visitors_low95/visitors_high95, those
+        are the wider 95% ranges; give the 80% range unless asked for 95%.
         Forecasts refresh every night. If the result starts with STALE
         FORECAST, the refresh hasn't run for days: lead with how old the
         forecast is, in plain words, before giving any numbers, and never
