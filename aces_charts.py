@@ -365,6 +365,11 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
                 notes.append(f"{count} {'period has' if count == 1 else 'periods have'} {meaning}.")
     if "DEED DATA GAP" in source["text"] and source_name in ("ACES_Deed_Volume", "ACES_Daily_Briefing"):
         notes.append("Deed data has a loading gap: the most recent deed figures are incomplete, not zero.")
+    stale = re.search(r"STALE FORECAST: the newest forecast here was made on (\d{4}-\d{2}-\d{2}), (\d+) days ago",
+                      source["text"])
+    if stale and source_name in ("ACES_Forecast", "ACES_Daily_Briefing"):
+        notes.append(f"This forecast was made {_friendly_x(stale.group(1))} ({stale.group(2)} days ago) "
+                     "and hasn't been updated since, so it's out of date.")
     if table["limit_reached"]:
         notes.append("The data tool stopped at its row limit, so later periods aren't shown.")
 

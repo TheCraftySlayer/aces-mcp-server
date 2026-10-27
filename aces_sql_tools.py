@@ -41,6 +41,9 @@ Settings (environment variables)
   ACES_SQL_DRIVER          default "ODBC Driver 18 for SQL Server"
   ACES_SQL_TIMEOUT_SECONDS default 30
   ACES_SQL_RETRY_ATTEMPTS  default 3 (connection drops and timeouts only)
+  ACES_FORECAST_STALE_DAYS default 2. ACES_Forecast and ACES_Daily_Briefing open with a
+                           STALE FORECAST warning when the newest forecast is this many days
+                           old or more (forecasts normally refresh every night).
 
 Requires: pip install pyodbc, plus Microsoft ODBC Driver 18 for SQL Server.
 """
@@ -78,6 +81,11 @@ SQL_DRIVER = os.getenv("ACES_SQL_DRIVER", "ODBC Driver 18 for SQL Server").strip
 SQL_TIMEOUT_SECONDS = int(os.getenv("ACES_SQL_TIMEOUT_SECONDS", "30"))
 SQL_RETRY_ATTEMPTS = max(1, int(os.getenv("ACES_SQL_RETRY_ATTEMPTS", "3")))
 MAX_ROWS = 200
+FORECAST_STALE_DAYS = max(1, int(os.getenv("ACES_FORECAST_STALE_DAYS", "2")))
+
+# Words that mark the ai_api.forecast column saying when the forecast was made. The
+# check reads the date from that column's values and skips any value that isn't a date.
+_FORECAST_MADE_HINTS = ("generated", "issued", "created", "stored", "run_at", "run_time", "made")
 
 TOOL_NAMES = [
     "ACES_Office_Volume",
@@ -335,6 +343,43 @@ def _parse_upc(value: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Forecast freshness
+# ---------------------------------------------------------------------------
+
+def _forecast_made_date(columns: List[str], rows: List[List[Any]]) -> Tuple[Optional[date], str]:
+    """Newest date the forecast rows were made, and the column it came from. (None, "") if no column says."""
+    best: Optional[date] = None
+    best_col = ""
+    for i, col in enumerate(columns):
+        name = str(col).strip().lower()
+        if not any(hint in name for hint in _FORECAST_MADE_HINTS):
+            continue
+        for row in rows:
+            try:
+                made = date.fromisoformat(str(row[i])[:10])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if best is None or made > best:
+                best, best_col = made, str(col)
+    return best, best_col
+
+
+def _stale_forecast_note(made: Optional[date], today: date, stale_days: int = FORECAST_STALE_DAYS) -> str:
+    """The STALE FORECAST line when the newest forecast is stale_days old or more, else ""."""
+    if made is None:
+        return ""
+    age = (today - made).days
+    if age < stale_days:
+        return ""
+    return (
+        f"STALE FORECAST: the newest forecast here was made on {made}, {age} days ago. "
+        "Forecasts normally refresh every night, so these numbers leave out everything since then. "
+        f'Say this first, in plain words, before any numbers (for example "This forecast is {age} days old '
+        f'and hasn\'t been updated since {made:%b} {made.day}"), and don\'t call it the current forecast.'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
 
@@ -398,6 +443,7 @@ def register_sql_tools(
         empty: str = "",
         link_rows: bool = False,
         link_upc: str = "",
+        lead: Optional[Callable[[List[str], List[List[Any]]], str]] = None,
     ) -> str:
         try:
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
@@ -411,6 +457,9 @@ def register_sql_tools(
         if link_rows and rows:
             columns, rows = _add_link_column(columns, rows)
         text = _format_rows(title, columns, rows, note, empty)
+        first = lead(columns, rows) if (lead is not None and rows) else ""
+        if first:
+            text = f"{first}\n\n{text}"
         link = _link_for(link_upc) if (link_upc and rows) else ""
         if link:
             text += f"\nNOV Explainer (county sign-in required): {link}"
@@ -485,6 +534,18 @@ def register_sql_tools(
             ),
         )
 
+    def _forecast_lead(tool: str, columns: List[str], rows: List[List[Any]], today: date) -> str:
+        """STALE FORECAST line for a forecast result, or "". Logs the made date so the column match can be checked."""
+        made, col = _forecast_made_date(columns, rows)
+        if made is None:
+            log("forecast freshness check skipped - no column says when the forecast was made",
+                tool=tool, columns=", ".join(str(c) for c in columns)[:400])
+            return ""
+        note = _stale_forecast_note(made, today)
+        log("forecast freshness", tool=tool, made=str(made), column=col,
+            age_days=(today - made).days, stale=bool(note))
+        return note
+
     async def ACES_Forecast(startDate: str, endDate: str) -> str:
         """
         Current daily forecast of calls and walk-in visits (with 80% ranges)
@@ -499,16 +560,27 @@ def register_sql_tools(
         The 80% range is the forecast's stated range, not a measured hit rate.
         If asked how often actual days land inside it, use
         ACES_Forecast_Accuracy instead of assuming 80%.
+        Forecasts refresh every night. If the result starts with STALE
+        FORECAST, the refresh hasn't run for days: lead with how old the
+        forecast is, in plain words, before giving any numbers, and never
+        call it the current forecast.
         """
         try:
             start, end = _parse_date(startDate, "startDate"), _parse_date(endDate, "endDate")
         except ValueError as exc:
             return _bad_input(exc)
+        today = _today_mountain()
+
+        def _lead(columns: List[str], rows: List[List[Any]]) -> str:
+            # A range entirely in the past is history, so its age isn't a warning.
+            return _forecast_lead("ACES_Forecast", columns, rows, today) if end >= today else ""
+
         return await _call(
             "ACES_Forecast", "ai_api.forecast",
             [("start_date", start), ("end_date", end)],
             f"Forecast, {start} to {end}",
             _VOLUME_NOTE + " Forecasts are estimates to support manager decisions, not staff assignments.",
+            lead=_lead,
         )
 
     async def ACES_Forecast_Accuracy(startDate: str, endDate: str) -> str:
@@ -769,8 +841,10 @@ def register_sql_tools(
         section is total inbound, a larger count: compare forecast with
         actual only through the forecast vs actual section or
         forecast_basis_calls, never inbound_calls. A section marked
-        UNAVAILABLE failed to load; say which one, and don't estimate it. For
-        detail beyond the briefing, use the individual ACES_* tools.
+        UNAVAILABLE failed to load; say which one, and don't estimate it. If
+        the briefing has a STALE FORECAST line, the nightly forecast refresh
+        hasn't run for days: lead with that, before any numbers. For detail
+        beyond the briefing, use the individual ACES_* tools.
         """
         tool = "ACES_Daily_Briefing"
         today = _today_mountain()
@@ -811,6 +885,10 @@ def register_sql_tools(
             lines.append(f"No open office day found in the {BRIEFING_LOOKBACK_DAYS} days before {today}.")
         else:
             lines.append(f"Last open day: {last_open:%A, %B} {last_open.day}, {last_open.year}")
+        if not isinstance(forecast, BaseException) and forecast[1]:
+            stale = _forecast_lead(tool, forecast[0], forecast[1], today)
+            if stale:
+                lines.append(stale)
         lines.append("")
         lines.append(_section("== Today's forecast ==", forecast,
                               "No forecast for today (the office may be closed, or no forecast has been issued)."))
