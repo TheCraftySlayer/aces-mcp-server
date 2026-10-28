@@ -563,6 +563,22 @@ def register_sql_tools(
         forecast needs more. Give it only when asked about phones or staffing.
         If the result has no phones_needed_peak_hour column, say the forecast
         has no phone figure; don't work one out from the call counts.
+        Tax-bill season: rows for season dates (Nov 2 to Dec 23, 2026) also
+        have season_calls (customer-facing) and season_visitors, each with
+        _low and _high (an 80% range), season_phones_needed_peak_hour (and
+        _high, at the season high), season_adjustment and
+        season_days_checked. They come from the last three tax-bill seasons
+        (2023 to 2025), lined up by the day the bills were mailed and applied
+        to this October's normal level, then scaled by how this season is
+        running so far (season_adjustment, from season_days_checked finished
+        days). The regular calls and visitors columns leave the season out,
+        so for these dates give the season numbers as the forecast and say
+        once that they're based on the last three tax-bill seasons. Describe
+        season phones the same way as phones_needed_peak_hour, and give them
+        only when asked about phones or staffing. To chart these dates, use
+        season_calls with season_calls_low and season_calls_high as the range
+        (or the season_visitors columns). Season columns are empty on other
+        dates.
         Forecasts refresh every night. If the result starts with STALE
         FORECAST, the refresh hasn't run for days: lead with how old the
         forecast is, in plain words, before giving any numbers, and never
@@ -845,9 +861,10 @@ def register_sql_tools(
         UNAVAILABLE failed to load; say which one, and don't estimate it. If
         the briefing has a STALE FORECAST line, the nightly forecast refresh
         hasn't run for days: lead with that, before any numbers. Today's
-        forecast may include phones_needed_peak_hour; describe it the way
-        ACES_Forecast says (phones needed in the busiest hour, not a staffing
-        level). For detail beyond the briefing, use the individual ACES_* tools.
+        forecast may include phones_needed_peak_hour and, during the tax-bill
+        season, season_ columns; describe and use them the way ACES_Forecast
+        says (season numbers are the forecast on season dates; phones are
+        phones needed in the busiest hour, not a staffing level). For detail beyond the briefing, use the individual ACES_* tools.
         """
         tool = "ACES_Daily_Briefing"
         today = _today_mountain()

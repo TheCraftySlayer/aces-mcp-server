@@ -64,7 +64,8 @@ CHART_TOOL: Dict[str, Any] = {
         "numbers of open days. Line charts suit trends over time (up to 200 points); bar charts suit up to 40 "
         "categories. For a forecast, put the forecast column in y and its 80% low and high columns in "
         "rangeLow and rangeHigh; if the result also has the 95% columns, the chart opens on the 80% range and adds a "
-        "button to switch to 95%, so draw it once. Returns a short summary and any data notes, which you must pass along."
+        "button to switch to 95%, so draw it once. For tax-bill season dates, chart season_calls with "
+        "season_calls_low and season_calls_high as the range. Returns a short summary and any data notes, which you must pass along."
     ),
     "input_schema": {
         "type": "object",
@@ -395,7 +396,8 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         if made:
             captions.append(f"Forecast made {_long_date(made)}.")
     if any("forecast_basis" in c for c in y_cols) or (
-        source_name in _FORECAST_SOURCES and any(c == "calls" or c.startswith("calls_") for c in y_cols)
+        source_name in _FORECAST_SOURCES
+        and any(c == "calls" or c.startswith("calls_") or c.startswith("season_calls") for c in y_cols)
     ):
         captions.append(_CUSTOMER_FACING_NOTE)
 
