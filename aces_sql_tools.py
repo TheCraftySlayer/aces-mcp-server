@@ -96,6 +96,7 @@ TOOL_NAMES = [
     "ACES_Deed_Volume",
     "ACES_Assessment_Calendar",
     "ACES_Daily_Briefing",
+    "ACES_Season_Outlook",
 ]
 
 # Set by register_sql_tools() so the health route can report what is live.
@@ -563,22 +564,23 @@ def register_sql_tools(
         forecast needs more. Give it only when asked about phones or staffing.
         If the result has no phones_needed_peak_hour column, say the forecast
         has no phone figure; don't work one out from the call counts.
-        Tax-bill season: rows for season dates (Nov 2 to Dec 23, 2026) also
-        have season_calls (customer-facing) and season_visitors, each with
-        _low and _high (an 80% range), season_phones_needed_peak_hour (and
-        _high, at the season high), season_adjustment and
-        season_days_checked. They come from the last three tax-bill seasons
-        (2023 to 2025), lined up by the day the bills were mailed and applied
-        to this October's normal level, then scaled by how this season is
-        running so far (season_adjustment, from season_days_checked finished
-        days). The regular calls and visitors columns leave the season out,
-        so for these dates give the season numbers as the forecast and say
-        once that they're based on the last three tax-bill seasons. Describe
-        season phones the same way as phones_needed_peak_hour, and give them
-        only when asked about phones or staffing. To chart these dates, use
-        season_calls with season_calls_low and season_calls_high as the range
-        (or the season_visitors columns). Season columns are empty on other
-        dates.
+        Seasons: on dates in a known busy season (tax bills in November,
+        Notices of Value in spring) rows also have season_name, season_basis,
+        season_calls (customer-facing) and season_visitors, each with _low and
+        _high (an 80% range), season_phones_needed_peak_hour (and _high, at
+        the season high), season_adjustment and season_days_checked. They come
+        from past seasons (season_basis says which) applied to the normal
+        level before the season, then scaled by how this season is running so
+        far (season_adjustment, from season_days_checked finished days). The
+        regular calls and visitors columns leave seasons out, so on these
+        dates give the season numbers as the forecast and say once which
+        season it is and what it's based on. Describe season phones the same
+        way as phones_needed_peak_hour, and give them only when asked about
+        phones or staffing. To chart these dates, use season_calls with
+        season_calls_low and season_calls_high as the range (or the
+        season_visitors columns). Season columns are empty on other dates. For
+        a season further ahead than this forecast reaches, use
+        ACES_Season_Outlook.
         Forecasts refresh every night. If the result starts with STALE
         FORECAST, the refresh hasn't run for days: lead with how old the
         forecast is, in plain words, before giving any numbers, and never
@@ -861,7 +863,7 @@ def register_sql_tools(
         UNAVAILABLE failed to load; say which one, and don't estimate it. If
         the briefing has a STALE FORECAST line, the nightly forecast refresh
         hasn't run for days: lead with that, before any numbers. Today's
-        forecast may include phones_needed_peak_hour and, during the tax-bill
+        forecast may include phones_needed_peak_hour and, during a busy
         season, season_ columns; describe and use them the way ACES_Forecast
         says (season numbers are the forecast on season dates; phones are
         phones needed in the busiest hour, not a staffing level). For detail beyond the briefing, use the individual ACES_* tools.
@@ -932,6 +934,45 @@ def register_sql_tools(
         lines.append(_CALENDAR_NOTE)
         return "\n".join(lines)
 
+    async def ACES_Season_Outlook(startDate: str, endDate: str) -> str:
+        """
+        Day-by-day outlook for known busy seasons (the Notice of Value
+        mailing in spring, tax bills in November), for planning ahead,
+        including dates the regular forecast doesn't reach yet (up to 200 days
+        per call). Each row has target_date, season_name, season_basis,
+        mailing_date, landing_date (when notices or bills land and calls
+        jump), deadline_date (the protest deadline, or the tax due date),
+        season_calls (customer-facing calls) and season_visitors with _low and
+        _high (an 80% range), season_phones_needed_peak_hour (and _high, at
+        the high end), season_adjustment, season_days_checked and level_basis.
+        When level_basis says the normal level is a planning guess, present
+        the numbers as a planning estimate with their range, not a forecast to
+        staff from. For a future season, say the outlook assumes the
+        mailing_date shown: the date may change, and ACES rebuilds the season
+        when it does. Say once which season it is and what it's based on
+        (season_name, season_basis). Describe phones the same way as
+        ACES_Forecast (phones needed in the busiest hour, not a staffing
+        level), and only when asked about phones or staffing. No rows means no
+        season is loaded for those dates, not that volume will be normal. For
+        dates the regular forecast covers, ACES_Forecast carries the same
+        season numbers next to the regular forecast. To chart, use
+        season_calls with season_calls_low and season_calls_high as the range.
+        """
+        try:
+            start, end = _parse_date(startDate, "startDate"), _parse_date(endDate, "endDate")
+        except ValueError as exc:
+            return _bad_input(exc)
+        return await _call(
+            "ACES_Season_Outlook", "ai_api.season_outlook",
+            [("start_date", start), ("end_date", end)],
+            f"Season outlook, {start} to {end}",
+            _VOLUME_NOTE + " Season numbers are planning estimates built from past seasons, not staff assignments.",
+            empty=(
+                f"No season is loaded between {start} and {end}. That doesn't mean volume will be normal; "
+                "only the seasons built into ACES appear here."
+            ),
+        )
+
     tools: Dict[str, Callable[..., Any]] = {
         "ACES_Office_Volume": ACES_Office_Volume,
         "ACES_Forecast": ACES_Forecast,
@@ -942,6 +983,7 @@ def register_sql_tools(
         "ACES_Deed_Volume": ACES_Deed_Volume,
         "ACES_Assessment_Calendar": ACES_Assessment_Calendar,
         "ACES_Daily_Briefing": ACES_Daily_Briefing,
+        "ACES_Season_Outlook": ACES_Season_Outlook,
     }
     for fn in tools.values():
         mcp.tool(fn)

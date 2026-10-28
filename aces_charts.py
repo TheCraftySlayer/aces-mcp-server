@@ -39,7 +39,7 @@ MAX_LABEL_CHARS = 60
 
 # Tools whose results are forecasts, and the column-name hints for when a forecast was made
 # (the same hints aces_sql_tools uses for the STALE FORECAST check).
-_FORECAST_SOURCES = ("ACES_Forecast", "ACES_Daily_Briefing")
+_FORECAST_SOURCES = ("ACES_Forecast", "ACES_Daily_Briefing", "ACES_Season_Outlook")
 _FORECAST_MADE_HINTS = ("as_of", "generated", "issued", "created", "stored", "run_at", "run_time", "made")
 _CUSTOMER_FACING_NOTE = "Calls are customer-facing calls, a smaller count than total inbound calls."
 
@@ -64,7 +64,7 @@ CHART_TOOL: Dict[str, Any] = {
         "numbers of open days. Line charts suit trends over time (up to 200 points); bar charts suit up to 40 "
         "categories. For a forecast, put the forecast column in y and its 80% low and high columns in "
         "rangeLow and rangeHigh; if the result also has the 95% columns, the chart opens on the 80% range and adds a "
-        "button to switch to 95%, so draw it once. For tax-bill season dates, chart season_calls with "
+        "button to switch to 95%, so draw it once. For season dates (ACES_Forecast or ACES_Season_Outlook), chart season_calls with "
         "season_calls_low and season_calls_high as the range. Returns a short summary and any data notes, which you must pass along."
     ),
     "input_schema": {

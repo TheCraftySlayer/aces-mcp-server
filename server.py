@@ -32,9 +32,9 @@ import aces_chat
 
 # Describe the SQL data tools to the model only when they will actually register.
 _SQL_TOOLS_NOTE = (
-    " Also exposes nine read-only ACES data tools (ACES_Office_Volume, ACES_Forecast, "
+    " Also exposes ten read-only ACES data tools (ACES_Office_Volume, ACES_Forecast, "
     "ACES_Forecast_Accuracy, ACES_NOV_Parcel, ACES_NOV_Search, ACES_NOV_Coverage, ACES_Deed_Volume, "
-    "ACES_Assessment_Calendar, ACES_Daily_Briefing) that query the ACES database through fixed stored "
+    "ACES_Assessment_Calendar, ACES_Daily_Briefing, ACES_Season_Outlook) that query the ACES database through fixed stored "
     "procedures. ACES_Daily_Briefing combines today's forecast, the last open day's results, recent deed "
     "volume and upcoming calendar dates in one call."
     if aces_sql_tools.SQL_TOOLS_ENABLED and not aces_sql_tools._config_problem()

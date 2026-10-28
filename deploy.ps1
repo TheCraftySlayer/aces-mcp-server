@@ -28,7 +28,7 @@ param(
     [string]$App           = "aces-mcp-bernco",
     [string]$Registry      = "acesmcpbernco",
     [string]$Repo          = "aces-mcp",
-    [int]$ExpectedTools    = 19,
+    [int]$ExpectedTools    = 20,
     [int]$VerifyMinutes    = 8,
     [switch]$SkipSmokeTest,
     [switch]$AllowDirty
