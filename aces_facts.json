@@ -1,0 +1,194 @@
+{
+  "about": "Staff-reviewed key facts for A.C.E.S. Change by commit only. A row counts as reviewed only when status is reviewed and reviewed_by and last_reviewed (YYYY-MM-DD) are filled in. Rows marked draft were compiled from the sources listed on 2026-10-28, checked against the web the same day, and need a sign-off.",
+  "topics": [
+    "value freeze",
+    "protest",
+    "head of family",
+    "residential value limit",
+    "office contact",
+    "assessor vs treasurer"
+  ],
+  "facts": [
+    {
+      "id": "vf_income_limit_2026",
+      "topic": "value freeze",
+      "tax_year": 2026,
+      "status": "reviewed",
+      "fact": "Modified gross income for 2025 must be $44,200 or less.",
+      "source": "Bernalillo County Assessor Forms page and 2026 Value Freeze Application instructions (Jan 6, 2026); Section 7-36-21.3 NMSA 1978",
+      "source_url": "https://www.bernco.gov/assessor/wp-content/uploads/sites/44/2026/01/2026_Value_Freeze_Application_English-Jan-6-2026.pdf",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "vf_income_year",
+      "topic": "value freeze",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "Each tax year uses the previous calendar year's income. Tax year 2027 will use 2026 income.",
+      "source": "Bernalillo County Assessor Forms page (previous tax year)",
+      "source_url": "https://www.bernco.gov/assessor/exemptions-applications-other/",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "vf_eligibility",
+      "topic": "value freeze",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "The applicant owns and lives in a single-family dwelling as their primary residence, and is 65 or older during the tax year applied for (turning 65 that year counts), or disabled under the Social Security Administration's or the Workers' Compensation Act's definition of disability.",
+      "source": "Bernalillo County Assessor Tax Savings Programs page; Section 7-36-21.3 NMSA 1978; 2026 state Value Freeze application (age 65 during the current tax year)",
+      "source_url": "https://www.bernco.gov/assessor/assessor/tax-savings-programs/",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "vf_deadline",
+      "topic": "value freeze",
+      "tax_year": null,
+      "status": "draft",
+      "fact": "Applications are accepted from January 1 through 30 days after the Notice of Value is mailed. The deadline depends on the mailing date on the notice.",
+      "source": "Bernalillo County Assessor For New Homeowners page; Assessor's 2025 Albuquerque Journal op-ed",
+      "source_url": "https://www.bernco.gov/assessor/for-new-homeowners/",
+      "reviewed_by": "",
+      "last_reviewed": ""
+    },
+    {
+      "id": "vf_effect",
+      "topic": "value freeze",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "The freeze stops increases in the taxable value of the primary residence. It doesn't freeze the tax bill, which can change when tax rates change.",
+      "source": "Bernalillo County Assessor Tax Savings Programs page; Value Freeze Application instructions",
+      "source_url": "https://www.bernco.gov/assessor/assessor/tax-savings-programs/",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "vf_household_income",
+      "topic": "value freeze",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "Modified gross income is the combined income of the applicant, the applicant's spouse and dependents, from every source, taxable or not, before losses.",
+      "source": "Section 7-2-2 NMSA 1978 definition, as quoted in Bernalillo County's Value Freeze instructions; 2026 state Value Freeze application, Part II",
+      "source_url": "",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "vf_reapply",
+      "topic": "value freeze",
+      "tax_year": null,
+      "status": "draft",
+      "fact": "An owner who files proof of eligibility for three consecutive tax years doesn't need to reapply in later years as long as their eligibility doesn't change. The Assessor applies the freeze automatically until eligibility changes.",
+      "source": "Section 7-36-21.3 NMSA 1978 as amended in 2019 (HB 429) and 2020 (SB 117); 2026 state Value Freeze application, general instructions",
+      "source_url": "https://nmlegis.gov/Sessions/19%20Regular/bills/house/HB0429TRS.PDF",
+      "reviewed_by": "",
+      "last_reviewed": ""
+    },
+    {
+      "id": "vf_reverify",
+      "topic": "value freeze",
+      "tax_year": null,
+      "status": "open",
+      "fact": "Whether and how often Bernalillo asks long-time freeze holders to send updated income information.",
+      "ask": "Ask the Value Freeze team."
+    },
+    {
+      "id": "protest_deadline",
+      "topic": "protest",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "A protest of value must be filed within 30 days of the date the Notice of Value was mailed. The deadline is on the notice.",
+      "source": "Section 7-38-24 NMSA 1978",
+      "source_url": "",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "hof_amount",
+      "topic": "head of family",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "The head of family exemption reduces the taxable value of a New Mexico resident head of family's property by $2,000. Only one household can claim it, and it applies to one property in the state.",
+      "source": "Section 7-37-4 NMSA 1978; Bernalillo County Assessor Tax Savings Programs and For New Homeowners pages",
+      "source_url": "https://www.bernco.gov/assessor/assessor/tax-savings-programs/",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "hof_deadline",
+      "topic": "head of family",
+      "tax_year": null,
+      "status": "draft",
+      "fact": "Apply within 30 days of the mailing of the Notice of Value.",
+      "source": "Bernalillo County Assessor For New Homeowners page",
+      "source_url": "https://www.bernco.gov/assessor/for-new-homeowners/",
+      "reviewed_by": "",
+      "last_reviewed": ""
+    },
+    {
+      "id": "hof_carries_forward",
+      "topic": "head of family",
+      "tax_year": null,
+      "status": "draft",
+      "fact": "Once claimed, the exemption stays on the property in later years without reapplying. It comes off when the property changes owners, and the new owner has to apply.",
+      "source": "Bernalillo County Assessor Know Your Value FAQ (2026); Section 7-38-17 NMSA 1978; county assessor guidance (Los Alamos, Chaves)",
+      "source_url": "https://www.bernco.gov/assessor/wp-content/uploads/sites/44/2026/01/FAQ-Trifold-2026.pdf",
+      "reviewed_by": "",
+      "last_reviewed": ""
+    },
+    {
+      "id": "res_limit",
+      "topic": "residential value limit",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "In Bernalillo County, a residential property's value can't go up more than 3% over the prior year. State law allows the higher of 3% over one year or 6.1% over two years; Bernalillo applies only the 3% yearly limit.",
+      "source": "Section 7-36-21.2 NMSA 1978; Bernalillo County Assessor valuation practice",
+      "source_url": "",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "res_limit_exceptions",
+      "topic": "residential value limit",
+      "tax_year": null,
+      "status": "open",
+      "fact": "How staff should explain the exceptions to the 3% limit in Section 7-36-21.2 NMSA 1978 (the first year a property is valued, physical improvements, and changes of ownership, zoning or use). Bills in 2025 and 2026 proposed changes to these exceptions, so confirm the current wording.",
+      "ask": "Confirm the office's standard wording with a supervisor."
+    },
+    {
+      "id": "office_contact",
+      "topic": "office contact",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "Bernalillo County Assessor's Office: 415 Silver Ave SW, Albuquerque, NM 87102. Phone (505) 222-3700. Email assessor@bernco.gov.",
+      "source": "Bernalillo County Assessor website",
+      "source_url": "https://www.bernco.gov/assessor/",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "clerk_contact",
+      "topic": "office contact",
+      "tax_year": null,
+      "status": "reviewed",
+      "fact": "County Clerk's Office, Recording and Filing: 415 Silver Ave SW (Alvarado Square), Albuquerque, NM 87102. Mail for recording: Bernalillo County Clerk's Office, Attn: Recording & Filing, P.O. Box 542, Albuquerque, NM 87103-0542. Recording (505) 468-1290; Bureau of Elections (505) 468-1291; email clerk@bernco.gov. Recording is open weekdays 8 a.m. to 5 p.m. and closes noon to 1:15 p.m. Divorce and foreclosure records are at the Second Judicial District Court.",
+      "source": "Bernalillo County Clerk, Recording and Filing page (checked Oct 28, 2026). Replaces the Oct 19 KB correction to PO Box 25500, which appears to be the elections mailing address.",
+      "source_url": "",
+      "reviewed_by": "Aaron Newe",
+      "last_reviewed": "2026-10-28"
+    },
+    {
+      "id": "assessor_vs_treasurer",
+      "topic": "assessor vs treasurer",
+      "tax_year": null,
+      "status": "draft",
+      "fact": "The Assessor values property and handles exemptions and the Value Freeze. Tax bills and payments are handled by the Bernalillo County Treasurer's Office, (505) 468-7031.",
+      "source": "Bernalillo County Assessor Know Your Value FAQ (2026); Bernalillo County news bulletin (Treasurer phone)",
+      "source_url": "https://www.bernco.gov/assessor/wp-content/uploads/sites/44/2026/01/FAQ-Trifold-2026.pdf",
+      "reviewed_by": "",
+      "last_reviewed": ""
+    }
+  ]
+}

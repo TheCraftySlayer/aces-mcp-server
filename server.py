@@ -27,6 +27,7 @@ from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 import aces_sql_tools
+import aces_facts
 import aces_chat
 
 
@@ -62,6 +63,9 @@ mcp = FastMCP(
     ) + _SQL_TOOLS_NOTE,
 )
 
+
+# Reviewed key facts (limits, deadlines, citations) from aces_facts.json.
+aces_facts.register(mcp)
 
 CUSTOMGPT_API_TOKEN = os.getenv("CUSTOMGPT_API_TOKEN", "").strip()
 
