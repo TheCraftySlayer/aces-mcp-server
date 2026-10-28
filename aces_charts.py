@@ -37,6 +37,12 @@ MAX_BAR_POINTS = 40
 MAX_TITLE_CHARS = 120
 MAX_LABEL_CHARS = 60
 
+# Tools whose results are forecasts, and the column-name hints for when a forecast was made
+# (the same hints aces_sql_tools uses for the STALE FORECAST check).
+_FORECAST_SOURCES = ("ACES_Forecast", "ACES_Daily_Briefing")
+_FORECAST_MADE_HINTS = ("as_of", "generated", "issued", "created", "stored", "run_at", "run_time", "made")
+_CUSTOMER_FACING_NOTE = "Calls are customer-facing calls, a smaller count than total inbound calls."
+
 # Columns that mean a period's source data is incomplete when above 0, the
 # reason, and the word a charted column must contain for it to matter ("" = any).
 _INCOMPLETE_COLUMNS = {
@@ -57,8 +63,8 @@ CHART_TOOL: Dict[str, Any] = {
         "(such as actual calls and a forecast) on the same chart; draw two charts instead. Use avg_ columns to compare periods that have different "
         "numbers of open days. Line charts suit trends over time (up to 200 points); bar charts suit up to 40 "
         "categories. For a forecast, put the forecast column in y and its 80% low and high columns in "
-        "rangeLow and rangeHigh; if the result also has the 95% columns, the chart adds a button to switch "
-        "ranges, so draw it once. Returns a short summary and any data notes, which you must pass along."
+        "rangeLow and rangeHigh; if the result also has the 95% columns, the chart opens on the 80% range and adds a "
+        "button to switch to 95%, so draw it once. Returns a short summary and any data notes, which you must pass along."
     ),
     "input_schema": {
         "type": "object",
@@ -342,6 +348,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
 
     band = None
     band_alt = None
+    opened_on_80 = False
     if low_col:
         if chart_type != "line":
             raise ChartError("A shaded range only works on a line chart.")
@@ -351,6 +358,10 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
                 raise ChartError(f"Row {n} has {low_col} above {high_col}; check the column order.")
         band = {"low": low, "high": high, "label": _clip(args.get("rangeLabel"), MAX_LABEL_CHARS) or "Range"}
         band_alt = _alternate_band(rows, low_col, high_col, band["label"], column_values)
+        # Always open on the 80% range, the one answers quote; the 95% range is one click away.
+        if band_alt and "95" in low_col and "95" in high_col:
+            band, band_alt = band_alt, band
+            opened_on_80 = True
 
     notes: List[str] = []
     if "partial_days" in rows[0]:
@@ -375,6 +386,18 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
                      "and hasn't been updated since, so it's out of date.")
     if table["limit_reached"]:
         notes.append("The data tool stopped at its row limit, so later periods aren't shown.")
+
+    # Captions: shown under the chart and on a saved image, which travels without the chat,
+    # but not data problems, so the model isn't asked to repeat them.
+    captions: List[str] = []
+    if source_name in _FORECAST_SOURCES and not stale:
+        made = _newest_made_date(rows)
+        if made:
+            captions.append(f"Forecast made {_long_date(made)}.")
+    if any("forecast_basis" in c for c in y_cols) or (
+        source_name in _FORECAST_SOURCES and any(c == "calls" or c.startswith("calls_") for c in y_cols)
+    ):
+        captions.append(_CUSTOMER_FACING_NOTE)
 
     # Periods when the office was closed the whole time (weekends, holidays) are shaded,
     # so dips read as closures, not demand. Blank open_days means the calendar isn't
@@ -413,7 +436,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         "band": band,
         "bandAlt": band_alt,
         "closed": closed,
-        "notes": notes,
+        "notes": notes + captions,
         "source": (f"{table['title']} ({source_name})" if table["title"] else source_name)[:240],
     }
 
@@ -433,6 +456,8 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
             f" A button on the chart switches the shaded range between the {band['label']} and the "
             f"{band_alt['label']}; the user can use it, so don't redraw the chart for the other range."
         )
+        if opened_on_80:
+            summary += f" The chart opens on the {band['label']}; to see the 95% range, the user clicks Show 95% range."
     if closed:
         summary += f" Days or periods when the office was closed ({sum(closed)}) are shaded on the chart and labeled Closed."
     if notes:
@@ -466,6 +491,27 @@ def _alternate_band(rows, low_col, high_col, label, column_values) -> Optional[D
 
 
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _newest_made_date(rows: List[Dict[str, str]]) -> str:
+    """Newest YYYY-MM-DD in a column that says when the forecast was made (as_of_date and the like), or ""."""
+    best = ""
+    for col in rows[0]:
+        if not any(hint in col for hint in _FORECAST_MADE_HINTS):
+            continue
+        for r in rows:
+            m = re.match(r"(\d{4}-\d{2}-\d{2})", str(r.get(col, "")).strip())
+            if m and m.group(1) > best:
+                best = m.group(1)
+    return best
+
+
+def _long_date(value: str) -> str:
+    """'2026-10-28' -> 'Oct 28, 2026'."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", value)
+    if not m or not 1 <= int(m.group(2)) <= 12:
+        return value
+    return f"{_MONTHS[int(m.group(2)) - 1]} {int(m.group(3))}, {m.group(1)}"
 
 
 def _friendly_x(value: Any) -> str:

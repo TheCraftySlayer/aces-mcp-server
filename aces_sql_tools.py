@@ -382,6 +382,21 @@ def _stale_forecast_note(made: Optional[date], today: date, stale_days: int = FO
 # Output formatting
 # ---------------------------------------------------------------------------
 
+# Old phone staffing columns from ai_api.forecast. They divide workload by 85% occupancy, which
+# understates a small team (ServiceLevelStaffing.cs in the ACES source says so; on quiet days they
+# say 1). The chat never sees them; phones_needed_peak_hour (Erlang C, added by
+# sql/52_FORECAST_PHONES_NEEDED.sql) is the phone figure it may give.
+_HIDDEN_FORECAST_COLUMNS = ("phone_staff", "peak_phone_staff")
+
+
+def _drop_columns(columns: List[str], rows: List[List[Any]], drop: Tuple[str, ...]) -> Tuple[List[str], List[List[Any]]]:
+    """columns and rows without the named columns (matched case-insensitively)."""
+    keep = [i for i, c in enumerate(columns) if str(c).strip().lower() not in drop]
+    if len(keep) == len(columns):
+        return columns, rows
+    return [columns[i] for i in keep], [[row[i] for i in keep] for row in rows]
+
+
 def _format_rows(title: str, columns: List[str], rows: List[List[Any]], note: str, empty: str = "") -> str:
     if not rows:
         return f"{title}\n{empty or 'No rows returned.'}\n{note}"
@@ -423,6 +438,7 @@ def register_sql_tools(
         note: str,
         empty: str = "",
         lead: Optional[Callable[[List[str], List[List[Any]]], str]] = None,
+        shape: Optional[Callable[[List[str], List[List[Any]]], Tuple[List[str], List[List[Any]]]]] = None,
     ) -> str:
         try:
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
@@ -433,6 +449,8 @@ def register_sql_tools(
             log("SQL data tool failed", tool=tool, proc=proc, error=str(exc)[:500])
             raise ToolError(f"{_ERROR_PREFIX} {_clean_sql_error(exc)}")
         log("SQL data tool ok", tool=tool, proc=proc, rows=len(rows))
+        if shape is not None:
+            columns, rows = shape(columns, rows)
         text = _format_rows(title, columns, rows, note, empty)
         first = lead(columns, rows) if (lead is not None and rows) else ""
         if first:
@@ -522,9 +540,9 @@ def register_sql_tools(
 
     async def ACES_Forecast(startDate: str, endDate: str) -> str:
         """
-        Current daily forecast of calls and walk-in visits (with 80% ranges)
-        and suggested phone staffing for a date range of up to 120 days.
-        Forecasts are planning estimates, not staff assignments.
+        Current daily forecast of calls and walk-in visits, with 80% and 95%
+        ranges, for a date range of up to 120 days. Forecasts are planning
+        estimates, not staff assignments.
         The call forecast counts customer-facing calls (the forecast-basis
         count: KPI-eligible inbound calls on the customer service routes), not
         total inbound calls, which is a larger count. Call them
@@ -536,6 +554,15 @@ def register_sql_tools(
         ACES_Forecast_Accuracy instead of assuming 80%. When the result also
         has calls_low95/calls_high95 and visitors_low95/visitors_high95, those
         are the wider 95% ranges; give the 80% range unless asked for 95%.
+        phones_needed_peak_hour, when present, is how many people need to be
+        on the phones in the day's busiest hour to answer 80% of calls within
+        60 seconds at the forecast volume. Call it "phones needed in the
+        busiest hour", never a staffing level or a schedule: it leaves out
+        time away from calls (breaks, lunch, walk-ins), so more people have to
+        be scheduled to have that many answering, and a day busier than the
+        forecast needs more. Give it only when asked about phones or staffing.
+        If the result has no phones_needed_peak_hour column, say the forecast
+        has no phone figure; don't work one out from the call counts.
         Forecasts refresh every night. If the result starts with STALE
         FORECAST, the refresh hasn't run for days: lead with how old the
         forecast is, in plain words, before giving any numbers, and never
@@ -557,6 +584,7 @@ def register_sql_tools(
             f"Forecast, {start} to {end}",
             _VOLUME_NOTE + " Forecasts are estimates to support manager decisions, not staff assignments.",
             lead=_lead,
+            shape=lambda c, r: _drop_columns(c, r, _HIDDEN_FORECAST_COLUMNS),
         )
 
     async def ACES_Forecast_Accuracy(startDate: str, endDate: str) -> str:
@@ -816,8 +844,10 @@ def register_sql_tools(
         forecast_basis_calls, never inbound_calls. A section marked
         UNAVAILABLE failed to load; say which one, and don't estimate it. If
         the briefing has a STALE FORECAST line, the nightly forecast refresh
-        hasn't run for days: lead with that, before any numbers. For detail
-        beyond the briefing, use the individual ACES_* tools.
+        hasn't run for days: lead with that, before any numbers. Today's
+        forecast may include phones_needed_peak_hour; describe it the way
+        ACES_Forecast says (phones needed in the busiest hour, not a staffing
+        level). For detail beyond the briefing, use the individual ACES_* tools.
         """
         tool = "ACES_Daily_Briefing"
         today = _today_mountain()
@@ -852,6 +882,8 @@ def register_sql_tools(
             ]
         results = await asyncio.gather(*jobs, return_exceptions=True)
         forecast, calendar = results[0], results[1]
+        if not isinstance(forecast, BaseException):
+            forecast = _drop_columns(forecast[0], forecast[1], _HIDDEN_FORECAST_COLUMNS)
 
         lines = [f"Daily briefing for {today:%A, %B} {today.day}, {today.year} (Mountain time)"]
         if last_open is None:
