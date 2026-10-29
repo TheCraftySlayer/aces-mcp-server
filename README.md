@@ -51,6 +51,7 @@ flowchart LR
 | `windows-service/` | Runs the server on a county Windows server as a service account: `install-aces-service.ps1` sets it up, `run-aces-service.ps1` is what the scheduled task runs, `service-settings.example.env` is the settings template. See `docs/OPERATIONS.md`. |
 | `Dockerfile` | Container image: Python 3.12 plus Microsoft ODBC Driver 18. |
 | `sql/` | The `ai_api` schema snapshot, the export script, and the numbered changes in the order they were applied. See `sql/README.md`. |
+| `docs/OPERATIONS.md` | Running it: setting up the county server, restarts, updates, logs, secrets and rotation, staff access, facts, evaluation runs, and what to check when something's wrong. |
 | `tests/` | Tests that run without any network or database. |
 | `examples/` | Sample MCP requests. |
 
@@ -285,16 +286,29 @@ scripts are the changes applied, in order.
 
 ## Known gaps
 
-- **Live paths aren't covered by tests.** Access control is at 92% and `server.py` at
-  75%, but the CustomGPT task path (26%), ArcGIS (16%) and the SQL tools (25%) need live
-  services, so they're checked by hand after a deploy. Overall coverage is 46%.
-- **Moved names kept their underscores.** Splitting `server.py` moved code without
-  changing it, so functions other modules now import (such as `_log` and
-  `_require_rest_auth`) still have a leading underscore. Renaming them is a separate,
-  mechanical change.
-- **The county database login can change every table.** On the county server the
-  server signs in as `ASR_CS_User`, the same login other ACES jobs use. Read-only there
-  depends on the server's code and its test, not on database permissions, and the
-  login's password is kept with the server's other secrets.
-- **One maintainer.** A second person who can deploy, rotate keys and update the facts
-  file hasn't been named yet.
+- **Live paths aren't covered by tests.** Access control is at 92%, the server's own sign-in
+  at 86% and `server.py` at 72%, but the CustomGPT task path (26%), ArcGIS (16%) and the SQL
+  tools (53%) need live services, so they're checked by hand after an update. Overall
+  coverage of the server's code is 48%.
+- **The Windows service scripts haven't run on Windows yet.** `windows-service/` parses
+  cleanly and its settings parsing is tested, but the first real install is the test.
+- **How Copilot Studio reaches a county server isn't settled.** Copilot Studio calls `/mcp`
+  from Microsoft's cloud. Until ISG says how that reaches an internal host, the Teams path
+  has no production home.
+- **No approved chat model for the county server.** The `/ui` chat runs on Azure OpenAI or
+  the Anthropic API. Neither is approved for the county server yet, so there the chat page
+  stays off and the MCP tools work without it.
+- **The county database login can change every table until `sql/56` is applied.** Desk-PC
+  runs (`start-aces.bat`) sign in as `ASR_CS_User`, the same login other ACES jobs use, and
+  the county server will too until the DBA creates its service-account login. Until then,
+  read-only there depends on the server's code and `tests/test_sql_read_only.py`, not on
+  database permissions.
+- **Reviewed facts aren't co-signed yet.** Every reviewed row is signed by one person. The
+  co-signing is built; the topic owners haven't signed, and three rows are still open.
+- **The Copilot Studio instructions are pasted by hand.** `copilot/agent-instructions.md` is
+  checked by tests, but nothing confirms the agent has the current text.
+- **One maintainer.** A second person who can deploy, rotate keys and update the facts file
+  hasn't been named yet. `docs/OPERATIONS.md` is written for them.
+- **Moved names kept their underscores.** Splitting `server.py` moved code without changing
+  it, so functions other modules import (such as `_log` and `_require_rest_auth`) still have
+  a leading underscore. Renaming them is a separate, mechanical change.
