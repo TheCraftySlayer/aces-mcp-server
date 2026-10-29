@@ -39,7 +39,7 @@ flowchart LR
 | `start-aces.bat`, `start-aces.ps1` | Starts the server on a Windows PC and opens the chat. |
 | `deploy.ps1` | Builds and deploys the container to Azure App Service, with checks and automatic rollback. |
 | `Dockerfile` | Container image: Python 3.12 plus Microsoft ODBC Driver 18. |
-| `sql/` | Database changes for the `ai_api` procedures, numbered in the order they were applied. |
+| `sql/` | The `ai_api` schema snapshot, the export script, the numbered changes in the order they were applied, and the limited login. See `sql/README.md`. |
 | `tests/` | Tests that run without any network or database. |
 | `examples/` | Sample MCP requests. |
 
@@ -217,10 +217,11 @@ every tool; live answers are checked by hand.
 
 ## Database changes
 
-`sql/` holds changes to the `ai_api` procedures, numbered in the order they were
-applied. Objects created before this folder existed (numbers below 51) aren't here.
-Their current definitions are in the database snapshot in the ACES forecasting repo
-(`ACES_DotNet_Source`, `database/`).
+`sql/` holds the database side. `sql/current/ai_api.sql` is the `ai_api` schema as it
+is in the database (every procedure the tools call, the `tool_log` columns and every
+permission on the schema), written by `sql/export_ai_api.py`; read it to check what the
+server's login can run. The numbered scripts are the changes applied, in order, and 55
+and 56 set up the limited login. `sql/README.md` explains each file.
 
 ## Known gaps
 
