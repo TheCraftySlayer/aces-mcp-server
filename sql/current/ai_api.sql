@@ -1,5 +1,5 @@
 /*
-  ai_api as it is in ASRCustomerService on asbcdbbernt, exported 2026-10-29 17:10 UTC
+  ai_api as it is in ASRCustomerService on asbcdbbernt, exported 2026-10-29 17:17 UTC
   by sql/export_ai_api.py. Generated: don't edit by hand. Rerun the script after any
   ai_api change and commit the result.
 
@@ -11,6 +11,12 @@ GRANT EXECUTE ON SCHEMA::[ai_api] TO [ai_api_executor];
 GRANT EXECUTE ON [ai_api].[assessment_calendar] TO [ai_api_executor];
 GRANT EXECUTE ON [ai_api].[season_outlook] TO [ASR_CS_User];
 
+/* ---- Role memberships of everyone who can run ai_api procedures ---- */
+/* These show what else those logins can do in the database, not just in ai_api. */
+ALTER ROLE [ai_api_executor] ADD MEMBER [ASR_CS_User];
+ALTER ROLE [db_datareader] ADD MEMBER [ASR_CS_User];
+ALTER ROLE [db_datawriter] ADD MEMBER [ASR_CS_User];
+
 /* ---- Table ai_api.tool_log (columns only) ---- */
 --   log_id  bigint  NOT NULL
 --   called_utc  datetime2(0)  NOT NULL
@@ -20,8 +26,6 @@ GRANT EXECUTE ON [ai_api].[season_outlook] TO [ASR_CS_User];
 
 /* ---- ai_api.assessment_calendar (sql stored procedure) ---- */
 /* ---------------------------------------------------------------------------
-   PART 1. Procedure
-
    @as_of comes from the server in Mountain time. If it's NULL, the procedure
    works out Mountain "today" itself, because Azure SQL's clock is UTC.
 
@@ -29,9 +33,7 @@ GRANT EXECUTE ON [ai_api].[season_outlook] TO [ASR_CS_User];
    contact-impact window covers today (so a mailing from five weeks ago still
    shows up while it's driving calls).
 
-   >>> BEFORE RUNNING: replace the TOOL_LOG placeholder with the
-   >>> INSERT INTO ai_api.tool_log line from ai_api.office_volume, changing
-   >>> the procedure name to 'assessment_calendar'.
+   Logs each call to ai_api.tool_log (55_ASSESSMENT_CALENDAR_LOGGING.sql).
    --------------------------------------------------------------------------- */
 CREATE   PROCEDURE ai_api.assessment_calendar
     @as_of      date = NULL,
@@ -49,7 +51,8 @@ BEGIN
     IF @days_back IS NULL OR @days_back < 0 OR @days_back > 365
         THROW 50002, 'days_back must be between 0 and 365.', 1;
 
-    -- TOOL_LOG: paste the logging INSERT from ai_api.office_volume here.
+    INSERT ai_api.tool_log (proc_name, params)
+    VALUES (OBJECT_NAME(@@PROCID), CONCAT('as_of=', @as_of, ' days_ahead=', @days_ahead, ' days_back=', @days_back));
 
     DECLARE @from date = DATEADD(day, -@days_back, @as_of);
     DECLARE @to   date = DATEADD(day,  @days_ahead, @as_of);
