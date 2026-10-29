@@ -6,7 +6,8 @@
     "head of family",
     "residential value limit",
     "office contact",
-    "assessor vs treasurer"
+    "assessor vs treasurer",
+    "veteran exemption"
   ],
   "facts": [
     {
@@ -187,6 +188,36 @@
       "fact": "The Assessor values property and handles exemptions and the Value Freeze. Tax bills and payments are handled by the Bernalillo County Treasurer's Office, (505) 468-7031.",
       "source": "Bernalillo County Assessor Know Your Value FAQ (2026); Bernalillo County news bulletin (Treasurer phone)",
       "source_url": "https://www.bernco.gov/assessor/wp-content/uploads/sites/44/2026/01/FAQ-Trifold-2026.pdf",
+      "reviewed_by": "",
+      "last_reviewed": ""
+    },
+    {
+      "id": "vet_amount_2025",
+      "topic": "veteran exemption",
+      "tax_year": 2025,
+      "status": "draft",
+      "fact": "The veteran exemption reduces the taxable value of property owned by a New Mexico resident veteran, or the veteran's unmarried surviving spouse, by $10,000 for tax year 2025. It was $4,000 for tax years 2006 through 2024.",
+      "source": "Section 7-37-5 NMSA 1978, as amended by House Bill 47 (2025)",
+      "source_url": "https://nmlegis.gov/Sessions/25%20Regular/final/HB0047.pdf",
+      "reviewed_by": "",
+      "last_reviewed": ""
+    },
+    {
+      "id": "vet_amount_adjusted",
+      "topic": "veteran exemption",
+      "tax_year": null,
+      "status": "open",
+      "fact": "The veteran exemption amount for tax year 2026 and later. Section 7-37-5 NMSA 1978 adjusts it for inflation each year, and the adjusted amount isn't on file.",
+      "ask": "Confirm the published amount with the NM Taxation and Revenue Department's Property Tax Division."
+    },
+    {
+      "id": "vet_disabled",
+      "topic": "veteran exemption",
+      "tax_year": null,
+      "status": "draft",
+      "fact": "Starting with tax year 2026, a veteran with a service-connected disability rating from 10% to 100% can get a property tax exemption proportional to that rating.",
+      "source": "Section 7-37-5.1 NMSA 1978, as amended by House Bill 47 (2025) and House Bill 285 (2026); NM Taxation and Revenue Department news release, Aug 13, 2026",
+      "source_url": "https://www.tax.newmexico.gov/wp-content/uploads/2026/08/20260813_New-Mexico-Veterans-Benefit-from-Expanded-Property-Tax-Exemptions.pdf",
       "reviewed_by": "",
       "last_reviewed": ""
     }
