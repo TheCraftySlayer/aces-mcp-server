@@ -50,9 +50,10 @@ import asyncio
 import os
 import re
 import time
-from datetime import date, datetime, timedelta, timezone
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 from fastmcp.exceptions import ToolError
 from starlette.responses import JSONResponse
@@ -107,7 +108,9 @@ _DATA_NOTE = (
     "Source: ACES database (read-only ai_api procedures), loaded from iasWorld extracts "
     "and office systems as of the latest load. Verify official values in iasWorld before relying on them."
 )
-_VOLUME_NOTE = "Source: ACES call, visitor and deed marts (read-only ai_api procedures). Counts reflect the latest data load."
+_VOLUME_NOTE = (
+    "Source: ACES call, visitor and deed marts (read-only ai_api procedures). Counts reflect the latest data load."
+)
 _CALENDAR_NOTE = (
     "Source: ACES assessment calendar (fact_assessment_event). Expected contact impact and likely "
     "contact reasons are planning estimates, not measured results."
@@ -129,12 +132,13 @@ def _today_mountain() -> date:
             return datetime.now(ZoneInfo("America/Denver")).date()
     except Exception:
         pass
-    return datetime.now(timezone.utc).date()
+    return datetime.now(UTC).date()
 
 
 # ---------------------------------------------------------------------------
 # Connection and execution
 # ---------------------------------------------------------------------------
+
 
 def _odbc_value(value: str) -> str:
     """Brace-quote a connection-string value so ; and } inside it are safe."""
@@ -210,7 +214,7 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _run_proc_sync(proc: str, params: List[Tuple[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
+def _run_proc_sync(proc: str, params: list[tuple[str, Any]]) -> tuple[list[str], list[list[Any]]]:
     import pyodbc  # imported lazily so the server starts without it when tools are off
 
     sql = f"EXEC {proc} " + ", ".join(f"@{name} = ?" for name, _ in params)
@@ -231,7 +235,7 @@ def _run_proc_sync(proc: str, params: List[Tuple[str, Any]]) -> Tuple[List[str],
         conn.close()
 
 
-def _run_proc_with_retry(proc: str, params: List[Tuple[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
+def _run_proc_with_retry(proc: str, params: list[tuple[str, Any]]) -> tuple[list[str], list[list[Any]]]:
     """
     Run a procedure, retrying only on connection drops and timeouts.
 
@@ -248,7 +252,7 @@ def _run_proc_with_retry(proc: str, params: List[Tuple[str, Any]]) -> Tuple[List
         except pyodbc.OperationalError:
             if attempt == SQL_RETRY_ATTEMPTS - 1:
                 raise
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
     raise RuntimeError("unreachable")
 
 
@@ -276,6 +280,7 @@ def _clean_sql_error(exc: Exception) -> str:
 # Input validation (the procedures validate again)
 # ---------------------------------------------------------------------------
 
+
 def _parse_date(value: Any, label: str) -> date:
     text = str(value or "").strip()[:10]
     try:
@@ -291,7 +296,7 @@ def _parse_grain(value: Any) -> str:
     return grain
 
 
-def _whole_weeks(start: date, grain: str) -> Tuple[date, str]:
+def _whole_weeks(start: date, grain: str) -> tuple[date, str]:
     """With grain week, move the start back to that week's Monday so the first week is whole.
     Returns the start to use and a note for the result title ('' when nothing moved)."""
     if grain != "week" or start.weekday() == 0:
@@ -300,7 +305,7 @@ def _whole_weeks(start: date, grain: str) -> Tuple[date, str]:
     return monday, f" (start moved back to Monday {monday} so every week is whole)"
 
 
-def _parse_tax_year(value: Any) -> Optional[int]:
+def _parse_tax_year(value: Any) -> int | None:
     if value in (None, "", 0, "0"):
         return None
     try:
@@ -346,9 +351,10 @@ def _parse_upc(value: Any) -> str:
 # Forecast freshness
 # ---------------------------------------------------------------------------
 
-def _forecast_made_date(columns: List[str], rows: List[List[Any]]) -> Tuple[Optional[date], str]:
+
+def _forecast_made_date(columns: list[str], rows: list[list[Any]]) -> tuple[date | None, str]:
     """Newest date the forecast rows were made, and the column it came from. (None, "") if no column says."""
-    best: Optional[date] = None
+    best: date | None = None
     best_col = ""
     for i, col in enumerate(columns):
         name = str(col).strip().lower()
@@ -364,7 +370,7 @@ def _forecast_made_date(columns: List[str], rows: List[List[Any]]) -> Tuple[Opti
     return best, best_col
 
 
-def _stale_forecast_note(made: Optional[date], today: date, stale_days: int = FORECAST_STALE_DAYS) -> str:
+def _stale_forecast_note(made: date | None, today: date, stale_days: int = FORECAST_STALE_DAYS) -> str:
     """The STALE FORECAST line when the newest forecast is stale_days old or more, else ""."""
     if made is None:
         return ""
@@ -375,7 +381,7 @@ def _stale_forecast_note(made: Optional[date], today: date, stale_days: int = FO
         f"STALE FORECAST: the newest forecast here was made on {made}, {age} days ago. "
         "Forecasts normally refresh every night, so these numbers leave out everything since then. "
         f'Say this first, in plain words, before any numbers (for example "This forecast is {age} days old '
-        f'and hasn\'t been updated since {made:%b} {made.day}"), and don\'t call it the current forecast.'
+        f"and hasn't been updated since {made:%b} {made.day}\"), and don't call it the current forecast."
     )
 
 
@@ -390,7 +396,9 @@ def _stale_forecast_note(made: Optional[date], today: date, stale_days: int = FO
 _HIDDEN_FORECAST_COLUMNS = ("phone_staff", "peak_phone_staff")
 
 
-def _drop_columns(columns: List[str], rows: List[List[Any]], drop: Tuple[str, ...]) -> Tuple[List[str], List[List[Any]]]:
+def _drop_columns(
+    columns: list[str], rows: list[list[Any]], drop: tuple[str, ...]
+) -> tuple[list[str], list[list[Any]]]:
     """columns and rows without the named columns (matched case-insensitively)."""
     keep = [i for i, c in enumerate(columns) if str(c).strip().lower() not in drop]
     if len(keep) == len(columns):
@@ -398,7 +406,7 @@ def _drop_columns(columns: List[str], rows: List[List[Any]], drop: Tuple[str, ..
     return [columns[i] for i in keep], [[row[i] for i in keep] for row in rows]
 
 
-def _format_rows(title: str, columns: List[str], rows: List[List[Any]], note: str, empty: str = "") -> str:
+def _format_rows(title: str, columns: list[str], rows: list[list[Any]], note: str, empty: str = "") -> str:
     if not rows:
         return f"{title}\n{empty or 'No rows returned.'}\n{note}"
     lines = [title, f"{len(rows)} row(s)" + (" (limit reached)" if len(rows) >= MAX_ROWS else ""), ""]
@@ -413,11 +421,12 @@ def _format_rows(title: str, columns: List[str], rows: List[List[Any]], note: st
 # Registration
 # ---------------------------------------------------------------------------
 
+
 def register_sql_tools(
     mcp: Any,
     log: Callable[..., None],
-    require_rest_auth: Callable[[Any], Optional[JSONResponse]],
-    normalize_address: Optional[Callable[[str], str]] = None,
+    require_rest_auth: Callable[[Any], JSONResponse | None],
+    normalize_address: Callable[[str], str] | None = None,
 ) -> bool:
     """Register the data tools and the /data-tool REST route. Returns True if registered."""
     global REGISTERED
@@ -434,12 +443,12 @@ def register_sql_tools(
     async def _call(
         tool: str,
         proc: str,
-        params: List[Tuple[str, Any]],
+        params: list[tuple[str, Any]],
         title: str,
         note: str,
         empty: str = "",
-        lead: Optional[Callable[[List[str], List[List[Any]]], str]] = None,
-        shape: Optional[Callable[[List[str], List[List[Any]]], Tuple[List[str], List[List[Any]]]]] = None,
+        lead: Callable[[list[str], list[list[Any]]], str] | None = None,
+        shape: Callable[[list[str], list[list[Any]]], tuple[list[str], list[list[Any]]]] | None = None,
     ) -> str:
         try:
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
@@ -518,25 +527,29 @@ def register_sql_tools(
             return _bad_input(exc)
         start, moved = _whole_weeks(start, g)
         return await _call(
-            "ACES_Office_Volume", "ai_api.office_volume",
+            "ACES_Office_Volume",
+            "ai_api.office_volume",
             [("start_date", start), ("end_date", end), ("grain", g)],
-            f"Office volume, {start} to {end}, by {g}{moved}", _VOLUME_NOTE,
+            f"Office volume, {start} to {end}, by {g}{moved}",
+            _VOLUME_NOTE,
             empty=(
                 f"No call or visit data loaded between {start} and {end}. If that includes "
                 "today, today's calls may not have loaded yet; that doesn't mean there were none."
             ),
         )
 
-    def _forecast_lead(tool: str, columns: List[str], rows: List[List[Any]], today: date) -> str:
+    def _forecast_lead(tool: str, columns: list[str], rows: list[list[Any]], today: date) -> str:
         """STALE FORECAST line for a forecast result, or "". Logs the made date so the column match can be checked."""
         made, col = _forecast_made_date(columns, rows)
         if made is None:
-            log("forecast freshness check skipped - no column says when the forecast was made",
-                tool=tool, columns=", ".join(str(c) for c in columns)[:400])
+            log(
+                "forecast freshness check skipped - no column says when the forecast was made",
+                tool=tool,
+                columns=", ".join(str(c) for c in columns)[:400],
+            )
             return ""
         note = _stale_forecast_note(made, today)
-        log("forecast freshness", tool=tool, made=str(made), column=col,
-            age_days=(today - made).days, stale=bool(note))
+        log("forecast freshness", tool=tool, made=str(made), column=col, age_days=(today - made).days, stale=bool(note))
         return note
 
     async def ACES_Forecast(startDate: str, endDate: str) -> str:
@@ -592,12 +605,13 @@ def register_sql_tools(
             return _bad_input(exc)
         today = _today_mountain()
 
-        def _lead(columns: List[str], rows: List[List[Any]]) -> str:
+        def _lead(columns: list[str], rows: list[list[Any]]) -> str:
             # A range entirely in the past is history, so its age isn't a warning.
             return _forecast_lead("ACES_Forecast", columns, rows, today) if end >= today else ""
 
         return await _call(
-            "ACES_Forecast", "ai_api.forecast",
+            "ACES_Forecast",
+            "ai_api.forecast",
             [("start_date", start), ("end_date", end)],
             f"Forecast, {start} to {end}",
             _VOLUME_NOTE + " Forecasts are estimates to support manager decisions, not staff assignments.",
@@ -618,7 +632,8 @@ def register_sql_tools(
         except ValueError as exc:
             return _bad_input(exc)
         return await _call(
-            "ACES_Forecast_Accuracy", "ai_api.forecast_accuracy",
+            "ACES_Forecast_Accuracy",
+            "ai_api.forecast_accuracy",
             [("start_date", start), ("end_date", end)],
             f"Forecast accuracy, {start} to {end} (latest forecast issued before each day)",
             _VOLUME_NOTE,
@@ -641,9 +656,11 @@ def register_sql_tools(
         except ValueError as exc:
             return _bad_input(exc)
         return await _call(
-            "ACES_NOV_Parcel", "ai_api.nov_parcel",
+            "ACES_NOV_Parcel",
+            "ai_api.nov_parcel",
             [("upc", clean_upc), ("tax_year", year)],
-            f"Notice of Value, UPC {clean_upc}", _DATA_NOTE,
+            f"Notice of Value, UPC {clean_upc}",
+            _DATA_NOTE,
             empty=(
                 f"No notice data found for UPC {clean_upc}"
                 + (f" in tax year {year}" if year else " in any loaded tax year")
@@ -660,10 +677,12 @@ def register_sql_tools(
         """
         raw = str(address or "").strip()
         if _looks_like_upc(raw):
-            return _bad_input(ValueError(
-                "That looks like a UPC, not an address. Use ACES_NOV_Parcel for a UPC; "
-                "NOV Search matches the start of a street address."
-            ))
+            return _bad_input(
+                ValueError(
+                    "That looks like a UPC, not an address. Use ACES_NOV_Parcel for a UPC; "
+                    "NOV Search matches the start of a street address."
+                )
+            )
         normalized = ""
         if normalize_address is not None:
             try:
@@ -678,9 +697,11 @@ def register_sql_tools(
         if len(search) < 4:
             return _bad_input(ValueError("address must be at least 4 characters."))
         return await _call(
-            "ACES_NOV_Search", "ai_api.nov_search",
+            "ACES_NOV_Search",
+            "ai_api.nov_search",
             [("address", search), ("tax_year", year)],
-            f"Accounts matching '{search}'", _DATA_NOTE,
+            f"Accounts matching '{search}'",
+            _DATA_NOTE,
             empty=(
                 f"No accounts have a situs address starting with '{search}'. "
                 "Check the house number and street spelling, and use the street "
@@ -698,9 +719,11 @@ def register_sql_tools(
         except ValueError as exc:
             return _bad_input(exc)
         return await _call(
-            "ACES_NOV_Coverage", "ai_api.nov_coverage",
+            "ACES_NOV_Coverage",
+            "ai_api.nov_coverage",
             [("tax_year", year)],
-            "Notice of Value explanation coverage", _DATA_NOTE,
+            "Notice of Value explanation coverage",
+            _DATA_NOTE,
         )
 
     async def _deed_freshness_note(tool: str) -> str:
@@ -759,9 +782,11 @@ def register_sql_tools(
             return _bad_input(exc)
         start, moved = _whole_weeks(start, g)
         result = await _call(
-            "ACES_Deed_Volume", "ai_api.deed_volume",
+            "ACES_Deed_Volume",
+            "ai_api.deed_volume",
             [("start_date", start), ("end_date", end), ("grain", g)],
-            f"Deed volume, {start} to {end}, by {g}{moved}", _VOLUME_NOTE,
+            f"Deed volume, {start} to {end}, by {g}{moved}",
+            _VOLUME_NOTE,
         )
         note = await _deed_freshness_note("ACES_Deed_Volume")
         return f"{result}\n{note}" if note else result
@@ -795,16 +820,18 @@ def register_sql_tools(
             return _bad_input(exc)
         today = _today_mountain()
         return await _call(
-            "ACES_Assessment_Calendar", "ai_api.assessment_calendar",
+            "ACES_Assessment_Calendar",
+            "ai_api.assessment_calendar",
             [("as_of", today), ("days_ahead", ahead), ("days_back", back)],
-            f"Assessment calendar around {today} ({back} days back, {ahead} ahead)", _CALENDAR_NOTE,
+            f"Assessment calendar around {today} ({back} days back, {ahead} ahead)",
+            _CALENDAR_NOTE,
             empty=(
                 f"No calendar dates between {today - timedelta(days=back)} and {today + timedelta(days=ahead)}. "
                 "The ACES assessment calendar may not be loaded for this period."
             ),
         )
 
-    async def _fetch(tool: str, proc: str, params: List[Tuple[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
+    async def _fetch(tool: str, proc: str, params: list[tuple[str, Any]]) -> tuple[list[str], list[list[Any]]]:
         """Run one procedure for the briefing; raises ToolError with a readable message."""
         try:
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
@@ -824,14 +851,14 @@ def register_sql_tools(
         columns, rows = result
         return _format_rows(title, columns, rows, "", empty).rstrip() + "\n"
 
-    def _last_open_day(columns: List[str], rows: List[List[Any]]) -> Tuple[Optional[date], Optional[List[Any]]]:
+    def _last_open_day(columns: list[str], rows: list[list[Any]]) -> tuple[date | None, list[Any] | None]:
         """Most recent row from a by-day ai_api.office_volume result with open_days > 0."""
         lowered = [str(c).strip().lower() for c in columns]
         if "first_day" not in lowered or "open_days" not in lowered:
             raise ToolError("office_volume did not return first_day and open_days columns")
         i_day, i_open = lowered.index("first_day"), lowered.index("open_days")
-        best: Optional[date] = None
-        best_row: Optional[List[Any]] = None
+        best: date | None = None
+        best_row: list[Any] | None = None
         for row in rows:
             try:
                 day = date.fromisoformat(str(row[i_day])[:10])
@@ -879,9 +906,13 @@ def register_sql_tools(
         # Step 1: find the last open day (and keep its volume row).
         try:
             vol_cols, vol_rows = await _fetch(
-                tool, "ai_api.office_volume",
-                [("start_date", today - timedelta(days=BRIEFING_LOOKBACK_DAYS)),
-                 ("end_date", today - timedelta(days=1)), ("grain", "day")],
+                tool,
+                "ai_api.office_volume",
+                [
+                    ("start_date", today - timedelta(days=BRIEFING_LOOKBACK_DAYS)),
+                    ("end_date", today - timedelta(days=1)),
+                    ("grain", "day"),
+                ],
             )
             last_open, last_row = _last_open_day(vol_cols, vol_rows)
         except ToolError as exc:
@@ -890,14 +921,16 @@ def register_sql_tools(
         # Step 2: everything else, in parallel. A failed section is marked, not hidden.
         jobs = [
             _fetch(tool, "ai_api.forecast", [("start_date", today), ("end_date", today)]),
-            _fetch(tool, "ai_api.assessment_calendar",
-                   [("as_of", today), ("days_ahead", 45), ("days_back", 14)]),
+            _fetch(tool, "ai_api.assessment_calendar", [("as_of", today), ("days_ahead", 45), ("days_back", 14)]),
         ]
         if last_open is not None:
             jobs += [
                 _fetch(tool, "ai_api.forecast_accuracy", [("start_date", last_open), ("end_date", last_open)]),
-                _fetch(tool, "ai_api.deed_volume",
-                       [("start_date", last_open - timedelta(days=6)), ("end_date", last_open), ("grain", "day")]),
+                _fetch(
+                    tool,
+                    "ai_api.deed_volume",
+                    [("start_date", last_open - timedelta(days=6)), ("end_date", last_open), ("grain", "day")],
+                ),
             ]
         results = await asyncio.gather(*jobs, return_exceptions=True)
         forecast, calendar = results[0], results[1]
@@ -914,23 +947,46 @@ def register_sql_tools(
             if stale:
                 lines.append(stale)
         lines.append("")
-        lines.append(_section("== Today's forecast ==", forecast,
-                              "No forecast for today (the office may be closed, or no forecast has been issued)."))
+        lines.append(
+            _section(
+                "== Today's forecast ==",
+                forecast,
+                "No forecast for today (the office may be closed, or no forecast has been issued).",
+            )
+        )
         if last_open is not None:
             accuracy, deeds = results[2], results[3]
-            lines.append(_section("== Last open day: actual calls and visits ==",
-                                  (vol_cols, [last_row]), "No volume row for the last open day."))
-            lines.append(_section("== Last open day: forecast vs actual ==", accuracy,
-                                  "No forecast was issued for the last open day."))
-            lines.append(_section(f"== Deed volume, {last_open - timedelta(days=6)} to {last_open} ==", deeds,
-                                  "No deed reports loaded for this week."))
+            lines.append(
+                _section(
+                    "== Last open day: actual calls and visits ==",
+                    (vol_cols, [last_row]),
+                    "No volume row for the last open day.",
+                )
+            )
+            lines.append(
+                _section(
+                    "== Last open day: forecast vs actual ==", accuracy, "No forecast was issued for the last open day."
+                )
+            )
+            lines.append(
+                _section(
+                    f"== Deed volume, {last_open - timedelta(days=6)} to {last_open} ==",
+                    deeds,
+                    "No deed reports loaded for this week.",
+                )
+            )
             deed_note = await _deed_freshness_note(tool)
             if deed_note:
                 lines.append(deed_note + "\n")
-        lines.append(_section("== Assessment calendar (14 days back, 45 ahead) ==", calendar,
-                              "No calendar dates in this window."))
-        lines.append(_VOLUME_NOTE + " Forecasts are estimates to support manager decisions, not staff assignments. "
-                     "Deed figures are volume, not backlog.")
+        lines.append(
+            _section(
+                "== Assessment calendar (14 days back, 45 ahead) ==", calendar, "No calendar dates in this window."
+            )
+        )
+        lines.append(
+            _VOLUME_NOTE + " Forecasts are estimates to support manager decisions, not staff assignments. "
+            "Deed figures are volume, not backlog."
+        )
         lines.append(_CALENDAR_NOTE)
         return "\n".join(lines)
 
@@ -963,7 +1019,8 @@ def register_sql_tools(
         except ValueError as exc:
             return _bad_input(exc)
         return await _call(
-            "ACES_Season_Outlook", "ai_api.season_outlook",
+            "ACES_Season_Outlook",
+            "ai_api.season_outlook",
             [("start_date", start), ("end_date", end)],
             f"Season outlook, {start} to {end}",
             _VOLUME_NOTE + " Season numbers are planning estimates built from past seasons, not staff assignments.",
@@ -973,7 +1030,7 @@ def register_sql_tools(
             ),
         )
 
-    tools: Dict[str, Callable[..., Any]] = {
+    tools: dict[str, Callable[..., Any]] = {
         "ACES_Office_Volume": ACES_Office_Volume,
         "ACES_Forecast": ACES_Forecast,
         "ACES_Forecast_Accuracy": ACES_Forecast_Accuracy,
@@ -1008,42 +1065,52 @@ def register_sql_tools(
         args = body.get("args") if isinstance(body.get("args"), dict) else {}
         fn = tools.get(tool_name)
         if fn is None:
-            return JSONResponse({
-                "status": "failed",
-                "answer": "Unknown data tool. Use one of: " + ", ".join(TOOL_NAMES) + ".",
-                "task_id": "",
-                "project_id": "",
-            })
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "answer": "Unknown data tool. Use one of: " + ", ".join(TOOL_NAMES) + ".",
+                    "task_id": "",
+                    "project_id": "",
+                }
+            )
         try:
             answer = await fn(**args)
         except TypeError as exc:
-            return JSONResponse({
-                "status": "failed",
-                "answer": f"{_ERROR_PREFIX} wrong arguments for {tool_name}: {exc}",
-                "task_id": "",
-                "project_id": "",
-            })
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "answer": f"{_ERROR_PREFIX} wrong arguments for {tool_name}: {exc}",
+                    "task_id": "",
+                    "project_id": "",
+                }
+            )
         except ToolError as exc:
-            return JSONResponse({
-                "status": "failed",
-                "answer": str(exc),
-                "task_id": "",
-                "project_id": "",
-            })
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "answer": str(exc),
+                    "task_id": "",
+                    "project_id": "",
+                }
+            )
         except Exception as exc:
             log("data tool route failed", tool=tool_name, error=str(exc)[:500])
-            return JSONResponse({
-                "status": "failed",
-                "answer": f"{_ERROR_PREFIX} the {tool_name} call failed unexpectedly.",
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "answer": f"{_ERROR_PREFIX} the {tool_name} call failed unexpectedly.",
+                    "task_id": "",
+                    "project_id": "",
+                }
+            )
+        return JSONResponse(
+            {
+                "status": "completed",
+                "answer": answer,
                 "task_id": "",
                 "project_id": "",
-            })
-        return JSONResponse({
-            "status": "completed",
-            "answer": answer,
-            "task_id": "",
-            "project_id": "",
-        })
+            }
+        )
 
     REGISTERED = True
     log(

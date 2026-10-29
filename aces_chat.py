@@ -53,8 +53,9 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from fastmcp import Client
@@ -132,7 +133,7 @@ def _today_text() -> str:
             return now.strftime("%A, %B %d, %Y")
     except Exception:
         pass
-    return datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
+    return datetime.now(UTC).strftime("%A, %B %d, %Y")
 
 
 def _system_prompt() -> str:
@@ -173,7 +174,7 @@ def _system_prompt() -> str:
         "for the same tax year. If one does, give both results and say which tool returned each. Never tell "
         "staff to stop using a figure on your own judgment.\n"
         "- When you send a question to a specialist, pass the staff member's question as asked. You may add "
-        "\"in Bernalillo County\" and a tax year the staff member gave. Don't ask for sources, full requirement "
+        '"in Bernalillo County" and a tax year the staff member gave. Don\'t ask for sources, full requirement '
         "lists or past figures unless the staff member asked for them.\n"
         "- If a specialist lists figures from earlier years, give staff the current one and leave the old ones "
         "out unless they asked for history.\n"
@@ -191,7 +192,7 @@ def _system_prompt() -> str:
         "version as fact. If there is no reviewed fact, give the specialist's answer and say it hasn't "
         "been checked against reviewed facts.\n"
         "- If staff ask about a tax year with no reviewed figure, say it isn't confirmed yet and don't give one.\n"
-        "- When you mention a source to staff, say \"the office's reviewed facts\" for ACES_Key_Facts and use "
+        '- When you mention a source to staff, say "the office\'s reviewed facts" for ACES_Key_Facts and use '
         "plain names for specialists (Community Educator, Compliance Expert). Never show tool names with underscores.\n"
         "- Forecast call numbers are customer-facing calls, a smaller count than total inbound calls. Say so when "
         "you give or chart them, and never set them beside inbound_calls as if they were the same measure.\n"
@@ -232,6 +233,7 @@ def _system_prompt() -> str:
 # Conversation history from the browser
 # ---------------------------------------------------------------------------
 
+
 def _tool_result_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -244,7 +246,7 @@ def _tool_result_text(content: Any) -> str:
     return str(content or "")
 
 
-def _clean_block(block: Any) -> Optional[Dict[str, Any]]:
+def _clean_block(block: Any) -> dict[str, Any] | None:
     if not isinstance(block, dict):
         return None
     kind = block.get("type")
@@ -271,7 +273,7 @@ def _clean_block(block: Any) -> Optional[Dict[str, Any]]:
     return out
 
 
-def _is_question(message: Dict[str, Any]) -> bool:
+def _is_question(message: dict[str, Any]) -> bool:
     """A user turn the person typed, as opposed to a turn carrying tool results."""
     if message.get("role") != "user":
         return False
@@ -281,11 +283,11 @@ def _is_question(message: Dict[str, Any]) -> bool:
     return isinstance(content, list) and all(b.get("type") == "text" for b in content) and bool(content)
 
 
-def _clean_history(raw: Any) -> List[Dict[str, Any]]:
+def _clean_history(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise ChatError("Send the conversation as a list of messages.")
 
-    messages: List[Dict[str, Any]] = []
+    messages: list[dict[str, Any]] = []
     for item in raw[-400:]:
         if not isinstance(item, dict):
             continue
@@ -322,7 +324,8 @@ def _clean_history(raw: Any) -> List[Dict[str, Any]]:
 # Model and tool calls
 # ---------------------------------------------------------------------------
 
-async def _call_model(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+async def _call_model(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Returns {"content": [blocks], "stop_reason": ..., "usage": {...}} in the shape the
     tool loop uses (text / tool_use blocks; stop_reason tool_use, max_tokens or end_turn).
@@ -332,7 +335,7 @@ async def _call_model(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]
     return await _call_anthropic(messages, tools)
 
 
-async def _call_anthropic(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def _call_anthropic(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
     payload = {
         "model": CHAT_MODEL,
         "max_tokens": CHAT_MAX_TOKENS,
@@ -385,7 +388,7 @@ async def _call_anthropic(messages: List[Dict[str, Any]], tools: List[Dict[str, 
 # Azure OpenAI (Responses API, v1 endpoint)
 # ---------------------------------------------------------------------------
 
-_token_cache: Dict[str, Any] = {"token": "", "expires": 0.0}
+_token_cache: dict[str, Any] = {"token": "", "expires": 0.0}
 
 
 async def _managed_identity_token() -> str:
@@ -418,16 +421,16 @@ async def _managed_identity_token() -> str:
     return _token_cache["token"]
 
 
-def _to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _to_responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stored conversation (text / tool_use / tool_result blocks) to Responses API input items."""
-    items: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     for message in messages:
         role = message["role"]
         content = message["content"]
         if isinstance(content, str):
             items.append({"role": role, "content": content})
             continue
-        texts: List[str] = []
+        texts: list[str] = []
 
         def flush_text() -> None:
             if texts:
@@ -458,9 +461,9 @@ def _to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return items
 
 
-def _from_responses_output(data: Dict[str, Any]) -> Dict[str, Any]:
+def _from_responses_output(data: dict[str, Any]) -> dict[str, Any]:
     """Responses API result to the {"content", "stop_reason", "usage"} shape the tool loop uses."""
-    blocks: List[Dict[str, Any]] = []
+    blocks: list[dict[str, Any]] = []
     for item in data.get("output") or []:
         kind = item.get("type")
         if kind == "message":
@@ -487,7 +490,10 @@ def _from_responses_output(data: Dict[str, Any]) -> Dict[str, Any]:
 
     if any(b["type"] == "tool_use" for b in blocks):
         stop_reason = "tool_use"
-    elif data.get("status") == "incomplete" and (data.get("incomplete_details") or {}).get("reason") == "max_output_tokens":
+    elif (
+        data.get("status") == "incomplete"
+        and (data.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
+    ):
         stop_reason = "max_tokens"
     else:
         stop_reason = "end_turn"
@@ -503,7 +509,7 @@ def _from_responses_output(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _responses_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # strict=False: MCP tool schemas have optional fields, which strict mode rejects.
     return [
         {
@@ -517,8 +523,8 @@ def _responses_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
-async def _call_azure_openai(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
+async def _call_azure_openai(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "model": AZURE_OPENAI_DEPLOYMENT,
         "instructions": _system_prompt(),
         "input": _to_responses_input(messages),
@@ -574,10 +580,14 @@ async def _call_azure_openai(messages: List[Dict[str, Any]], tools: List[Dict[st
     raise ChatError(f"Azure OpenAI is busy right now (HTTP {last_status}).")
 
 
-def _tool_definitions(listed: List[Any]) -> List[Dict[str, Any]]:
+def _tool_definitions(listed: list[Any]) -> list[dict[str, Any]]:
     tools = []
     for tool in listed:
-        schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None) or {"type": "object", "properties": {}}
+        schema = (
+            getattr(tool, "input_schema", None)
+            or getattr(tool, "inputSchema", None)
+            or {"type": "object", "properties": {}}
+        )
         tools.append(
             {
                 "name": tool.name,
@@ -588,7 +598,7 @@ def _tool_definitions(listed: List[Any]) -> List[Dict[str, Any]]:
     return tools
 
 
-async def _run_tool(client: Client, block: Dict[str, Any], emit, log, full_text: Dict[str, str]) -> Dict[str, Any]:
+async def _run_tool(client: Client, block: dict[str, Any], emit, log, full_text: dict[str, str]) -> dict[str, Any]:
     name = block["name"]
     tool_input = block.get("input") or {}
     await emit({"type": "tool_start", "id": block["id"], "name": name, "input": tool_input})
@@ -623,7 +633,7 @@ async def _run_tool(client: Client, block: Dict[str, Any], emit, log, full_text:
     }
 
 
-async def _run_chart_tool(block: Dict[str, Any], sources: List[Dict[str, Any]], emit, log) -> Dict[str, Any]:
+async def _run_chart_tool(block: dict[str, Any], sources: list[dict[str, Any]], emit, log) -> dict[str, Any]:
     """Build_Chart runs here, not through MCP: it needs the conversation, and it draws in the browser."""
     tool_input = block.get("input") or {}
     await emit({"type": "tool_start", "id": block["id"], "name": block["name"], "input": tool_input})
@@ -640,7 +650,9 @@ async def _run_chart_tool(block: Dict[str, Any], sources: List[Dict[str, Any]], 
         content, spec, is_error = summary, None, True
     elapsed_ms = int((time.monotonic() - started) * 1000)
     if spec is not None and len(content) > MAX_TOOL_RESULT_CHARS:
-        summary = "Chart not drawn: it has too much data to keep in the conversation. Use a coarser grain or fewer series."
+        summary = (
+            "Chart not drawn: it has too much data to keep in the conversation. Use a coarser grain or fewer series."
+        )
         content, spec, is_error = summary, None, True
     log(
         "chat chart",
@@ -653,17 +665,24 @@ async def _run_chart_tool(block: Dict[str, Any], sources: List[Dict[str, Any]], 
     if spec is not None:
         await emit({"type": "chart", "id": block["id"], "spec": spec})
     await emit(
-        {"type": "tool_end", "id": block["id"], "name": block["name"], "is_error": is_error, "ms": elapsed_ms, "preview": summary[:PREVIEW_CHARS]}
+        {
+            "type": "tool_end",
+            "id": block["id"],
+            "name": block["name"],
+            "is_error": is_error,
+            "ms": elapsed_ms,
+            "preview": summary[:PREVIEW_CHARS],
+        }
     )
     return {"type": "tool_result", "tool_use_id": block["id"], "content": content, "is_error": is_error}
 
 
-async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
+async def _run_chat(mcp, history: list[dict[str, Any]], emit, log) -> None:
     conversation = list(history)
-    new_messages: List[Dict[str, Any]] = []
+    new_messages: list[dict[str, Any]] = []
     usage = {"input_tokens": 0, "output_tokens": 0}
 
-    full_text: Dict[str, str] = {}  # untruncated results from this request, for Build_Chart
+    full_text: dict[str, str] = {}  # untruncated results from this request, for Build_Chart
 
     async with Client(mcp) as client:
         tools = _tool_definitions(await client.list_tools())
@@ -698,13 +717,26 @@ async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
             if round_number == CHAT_MAX_TOOL_ROUNDS:
                 # Out of rounds: answer the pending tool calls so the history stays valid, then stop.
                 results = [
-                    {"type": "tool_result", "tool_use_id": b["id"], "content": "Not run: the tool limit for one question was reached.", "is_error": True}
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": b["id"],
+                        "content": "Not run: the tool limit for one question was reached.",
+                        "is_error": True,
+                    }
                     for b in tool_uses
                 ]
                 tool_turn = {"role": "user", "content": results}
                 conversation.append(tool_turn)
                 new_messages.append(tool_turn)
-                stop_note = {"role": "assistant", "content": [{"type": "text", "text": "I stopped after the maximum number of tool calls for one question. Ask a narrower question or ask me to continue."}]}
+                stop_note = {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "I stopped after the maximum number of tool calls for one question. Ask a narrower question or ask me to continue.",
+                        }
+                    ],
+                }
                 new_messages.append(stop_note)
                 await emit({"type": "reply", "text": stop_note["content"][0]["text"]})
                 break
@@ -712,7 +744,7 @@ async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
             # Data tools first, then charts, so a chart can use a result from the same round.
             data_uses = [b for b in tool_uses if b["name"] != aces_charts.CHART_TOOL_NAME]
             chart_uses = [b for b in tool_uses if b["name"] == aces_charts.CHART_TOOL_NAME]
-            by_id: Dict[str, Dict[str, Any]] = {}
+            by_id: dict[str, dict[str, Any]] = {}
             for r in await asyncio.gather(*(_run_tool(client, b, emit, log, full_text) for b in data_uses)):
                 by_id[r["tool_use_id"]] = r
             if chart_uses:
@@ -725,7 +757,13 @@ async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
             conversation.append(tool_turn)
             new_messages.append(tool_turn)
 
-    log("chat answered", model=CHAT_MODEL, turns=len(new_messages), input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"])
+    log(
+        "chat answered",
+        model=CHAT_MODEL,
+        turns=len(new_messages),
+        input_tokens=usage["input_tokens"],
+        output_tokens=usage["output_tokens"],
+    )
     await emit({"type": "done", "messages": new_messages, "usage": usage, "model": CHAT_MODEL})
 
 
@@ -733,13 +771,16 @@ async def _run_chat(mcp, history: List[Dict[str, Any]], emit, log) -> None:
 # Route
 # ---------------------------------------------------------------------------
 
+
 def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
     """Register POST /chat. The x-aces-mcp-key check happens in server.py's middleware."""
 
     @mcp.custom_route("/chat", methods=["POST"])
     async def chat_route(request):
         if not CHAT_ENABLED:
-            return JSONResponse({"error": f"Chat is off on this server. An administrator needs to {CHAT_OFF_REASON}."}, status_code=503)
+            return JSONResponse(
+                {"error": f"Chat is off on this server. An administrator needs to {CHAT_OFF_REASON}."}, status_code=503
+            )
 
         try:
             body = await request.json()
@@ -760,7 +801,7 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
 
         queue: asyncio.Queue = asyncio.Queue()
 
-        async def emit(event: Dict[str, Any]) -> None:
+        async def emit(event: dict[str, Any]) -> None:
             await queue.put(event)
 
         async def worker() -> None:
@@ -771,7 +812,9 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
                 await emit({"type": "error", "message": str(exc)})
             except Exception as exc:
                 chat_log("chat failed unexpectedly", error=f"{exc.__class__.__name__}: {str(exc)[:300]}")
-                await emit({"type": "error", "message": "The chat failed on the server. Check the server log for details."})
+                await emit(
+                    {"type": "error", "message": "The chat failed on the server. Check the server log for details."}
+                )
             finally:
                 await queue.put(None)
 

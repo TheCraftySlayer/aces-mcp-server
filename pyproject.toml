@@ -1,0 +1,17 @@
+# Tool settings only. The server isn't installed as a package; run it with python server.py.
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"   # matches the Dockerfile (python:3.12)
+
+[tool.ruff.lint]
+# F: real errors (undefined names, unused imports)   E9: syntax errors
+# B: likely bugs                                      UP: modern syntax for 3.12
+# I: import order
+select = ["F", "E9", "B", "UP", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["server", "aces_chat", "aces_charts", "aces_facts", "aces_sql_tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
