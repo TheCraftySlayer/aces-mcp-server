@@ -316,7 +316,8 @@ def _normalize_cache_text(text: str) -> str:
         "comparable": "comp",
     }
     for old, new in replacements.items():
-        value = value.replace(old, new)
+        # Whole words only, so "courthouse" stays "courthouse" and "planet" stays "planet".
+        value = re.sub(rf"\b{re.escape(old)}\b", new, value)
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 

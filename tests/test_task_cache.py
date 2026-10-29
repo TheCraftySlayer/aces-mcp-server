@@ -90,3 +90,10 @@ def test_a_failed_write_keeps_the_previous_file(cache, monkeypatch, tmp_path):
     server._save_task_cache(cache)
     assert (tmp_path / "task_cache.json").read_text(encoding="utf-8") == before
     assert [p.name for p in tmp_path.iterdir()] == ["task_cache.json"]
+
+
+def test_cache_keys_shorten_whole_words_only():
+    assert server._normalize_cache_text("123 Main Street, Albuquerque, New Mexico") == "123 main st albuquerque nm"
+    assert server._normalize_cache_text("Where is the courthouse?") == "where is the courthouse"
+    assert server._normalize_cache_text("planet replacement broadway") == "planet replacement broadway"
+    assert server._normalize_cache_text("Find comparable properties") == "find comps"
