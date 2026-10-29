@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import tempfile
 import time
 from datetime import UTC, datetime
 from html import escape as html_escape
@@ -146,10 +147,20 @@ ACES_MCP_API_KEY = os.getenv("ACES_MCP_API_KEY", "").strip()
 
 CUSTOMGPT_BASE = os.getenv("CUSTOMGPT_BASE", "https://app.customgpt.ai/api/v1").rstrip("/")
 
-# The default /tmp location doesn't survive a container restart (on Azure, point this at
-# /home/... to keep it). Always return Task ID + Project ID for unfinished tasks so
-# Check_CustomGPT_Task can poll CustomGPT directly even after the cache resets.
-TASK_CACHE_FILE = os.getenv("TASK_CACHE_FILE", "/tmp/aces_task_cache.json")
+# The default is the system temp folder (/tmp in the container, %TEMP% on Windows), which
+# doesn't survive a container restart; on Azure, point this at /home/... to keep it.
+# Unfinished tasks always return Task ID + Project ID, so Check_CustomGPT_Task can poll
+# CustomGPT directly even after the cache resets.
+TASK_CACHE_FILE = os.getenv("TASK_CACHE_FILE", "").strip() or os.path.join(
+    tempfile.gettempdir(), "aces_task_cache.json"
+)
+# How long a finished specialist answer is reused for the same question instead of asking
+# the specialist again. Answers older than this are never reused, so a knowledge base
+# update shows up within this window. 0 turns reuse off entirely (use it for evaluation
+# runs, so every test question reaches the specialist).
+ANSWER_CACHE_HOURS = float(os.getenv("ACES_ANSWER_CACHE_HOURS", "24"))
+# Cache entries not touched for this many days are dropped when the cache is saved.
+TASK_CACHE_KEEP_DAYS = float(os.getenv("ACES_TASK_CACHE_KEEP_DAYS", "7"))
 
 # Generated Context Expert / CustomGPT artifact links.
 # The server returns staff-safe download links that proxy through this server without
@@ -168,7 +179,9 @@ PUBLIC_BASE_URL = (
     or os.getenv("PUBLIC_BASE_URL", "").strip()
     or (f"https://{_WEBSITE_HOSTNAME}" if _WEBSITE_HOSTNAME else "")
 ).rstrip("/")
-FILE_LINK_CACHE_FILE = os.getenv("ACES_FILE_LINK_CACHE_FILE", "/tmp/aces_file_link_cache.json")
+FILE_LINK_CACHE_FILE = os.getenv("ACES_FILE_LINK_CACHE_FILE", "").strip() or os.path.join(
+    tempfile.gettempdir(), "aces_file_link_cache.json"
+)
 FILE_LINK_TTL_SECONDS = int(os.getenv("ACES_FILE_LINK_TTL_SECONDS", "86400"))
 
 # CustomGPT tasks are async. These values keep MCP calls from holding open too long
@@ -412,6 +425,24 @@ def _safe_json_dumps(value: Any, max_len: int = 3000) -> str:
     return text
 
 
+def _write_json_atomic(path: str, data: Any) -> None:
+    """
+    Write to a temporary file next to the target, then swap it in. A crash or a full disk
+    mid-write leaves the previous file intact instead of a half-written one that the next
+    start would throw away.
+    """
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    temp_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 def _load_task_cache() -> dict[str, Any]:
     try:
         if os.path.exists(TASK_CACHE_FILE):
@@ -419,17 +450,32 @@ def _load_task_cache() -> dict[str, Any]:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
                 return loaded
-    except Exception as exc:
-        print(f"[task-cache] load failed: {exc}", flush=True)
+    except (OSError, ValueError) as exc:
+        _log("task cache load failed, starting empty", file=TASK_CACHE_FILE, error=str(exc))
     return {}
 
 
+def _prune_task_cache(cache: dict[str, Any]) -> int:
+    """Drop entries not touched for TASK_CACHE_KEEP_DAYS (or with no readable time). Returns how many."""
+    keep_minutes = TASK_CACHE_KEEP_DAYS * 24 * 60
+    stale = []
+    for key, value in cache.items():
+        age = _minutes_since(value.get("updated_at") or value.get("created_at")) if isinstance(value, dict) else None
+        if age is None or age > keep_minutes:
+            stale.append(key)
+    for key in stale:
+        cache.pop(key, None)
+    return len(stale)
+
+
 def _save_task_cache(cache: dict[str, Any]) -> None:
+    dropped = _prune_task_cache(cache)
+    if dropped:
+        _log("task cache pruned", dropped=dropped, kept=len(cache), keep_days=TASK_CACHE_KEEP_DAYS)
     try:
-        with open(TASK_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        print(f"[task-cache] save failed: {exc}", flush=True)
+        _write_json_atomic(TASK_CACHE_FILE, cache)
+    except (OSError, TypeError, ValueError) as exc:
+        _log("task cache save failed", file=TASK_CACHE_FILE, error=str(exc))
 
 
 TASK_CACHE: dict[str, Any] = _load_task_cache()
@@ -448,8 +494,8 @@ def _load_file_link_cache() -> dict[str, Any]:
                     for key, value in loaded.items()
                     if isinstance(value, dict) and float(value.get("expires_at", 0) or 0) > now
                 }
-    except Exception as exc:
-        print(f"[file-link-cache] load failed: {exc}", flush=True)
+    except (OSError, TypeError, ValueError) as exc:
+        _log("file link cache load failed, starting empty", file=FILE_LINK_CACHE_FILE, error=str(exc))
     return {}
 
 
@@ -465,10 +511,9 @@ def _save_file_link_cache(cache: dict[str, Any]) -> None:
         for key in expired:
             cache.pop(key, None)
 
-        with open(FILE_LINK_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        print(f"[file-link-cache] save failed: {exc}", flush=True)
+        _write_json_atomic(FILE_LINK_CACHE_FILE, cache)
+    except (OSError, TypeError, ValueError) as exc:
+        _log("file link cache save failed", file=FILE_LINK_CACHE_FILE, error=str(exc))
 
 
 FILE_LINK_CACHE: dict[str, Any] = _load_file_link_cache()
@@ -520,21 +565,39 @@ def _cached_answer_for_task(project_id: str, task_id: str) -> str:
     return ""
 
 
+def _cache_entry_still_fresh(entry: dict[str, Any]) -> bool:
+    """
+    Whether a cached task may still stand in for asking the specialist again.
+
+    A finished answer is reused for ANSWER_CACHE_HOURS after it came back. A task that
+    is still running is reused only while it can still finish (TASK_MAX_MINUTES), so a
+    repeated question doesn't start a second task. With ANSWER_CACHE_HOURS=0 nothing is
+    reused. An entry with no readable time is treated as stale.
+    """
+    if ANSWER_CACHE_HOURS <= 0:
+        return False
+    if str(entry.get("last_answer") or "").strip() or entry.get("status") in {"completed", "answered"}:
+        age = _minutes_since(entry.get("answered_at") or entry.get("updated_at"))
+        return age is not None and age < ANSWER_CACHE_HOURS * 60
+    age = _minutes_since(entry.get("created_at"))
+    return age is not None and age < TASK_MAX_MINUTES
+
+
 def _find_existing_prompt_task(project_id: str, tool_name: str, prompt_text: str) -> dict[str, Any] | None:
-    """Return an existing cached task for the same project/tool/semantic prompt."""
+    """Return a still-fresh cached task for the same project/tool/semantic prompt."""
     key = _task_cache_key(project_id, tool_name, prompt_text)
     dedupe_hash = _stable_hash(_canonical_prompt_for_cache(tool_name, prompt_text))
     reusable_statuses = {"submitted", "polling", "still_running", "completed", "answered"}
 
     direct = TASK_CACHE.get(key)
-    if isinstance(direct, dict):
+    if isinstance(direct, dict) and _cache_entry_still_fresh(direct):
         task_id = str(direct.get("task_id") or "").strip()
         status = str(direct.get("status") or "").strip()
         if task_id and status in reusable_statuses:
             return direct
 
     for value in TASK_CACHE.values():
-        if not isinstance(value, dict):
+        if not isinstance(value, dict) or not _cache_entry_still_fresh(value):
             continue
         if str(value.get("project_id", "")) != str(project_id):
             continue
@@ -594,10 +657,7 @@ def _remember_task(
 
     TASK_CACHE[key] = existing
     _save_task_cache(TASK_CACHE)
-    print(
-        f"[task-cache] saved tool={tool_name} project={project_id} task_id={task_id} status={status} key={key}",
-        flush=True,
-    )
+    _log("task cache saved", tool=tool_name, project=project_id, task_id=task_id, status=status, key=key)
     return key
 
 
@@ -648,7 +708,7 @@ def _update_task_cache_by_task_id(
 
     TASK_CACHE[key] = existing
     _save_task_cache(TASK_CACHE)
-    print(f"[task-cache] updated project={project_id} task_id={task_id} status={status} key={key}", flush=True)
+    _log("task cache updated", project=project_id, task_id=task_id, status=status, key=key)
     return key
 
 
@@ -2422,6 +2482,8 @@ async def health_check(request):
             "json_response": os.getenv("FASTMCP_JSON_RESPONSE", ""),
             "task_cache_file": TASK_CACHE_FILE,
             "task_cache_count": len(TASK_CACHE),
+            "answer_cache_hours": ANSWER_CACHE_HOURS,
+            "task_cache_keep_days": TASK_CACHE_KEEP_DAYS,
             "task_cache_debug_enabled": bool(ACES_ADMIN_TOKEN),
             "mcp_api_key_configured": bool(ACES_MCP_API_KEY),
             "default_poll_seconds": DEFAULT_POLL_SECONDS,

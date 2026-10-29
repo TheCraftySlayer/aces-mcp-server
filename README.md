@@ -117,6 +117,11 @@ Points a reviewer usually asks about:
 - **ArcGIS tools**: queries go to the county's public parcel layer.
 - **Task cache** (`TASK_CACHE_FILE`): task IDs, hashes of prompts (not the text) and
   the specialists' answers, so a repeated question doesn't start a second CustomGPT task.
+  An answer is reused for `ACES_ANSWER_CACHE_HOURS` (default 24) and then asked fresh,
+  so a specialist's knowledge base update shows up within a day. Entries are dropped
+  after `ACES_TASK_CACHE_KEEP_DAYS` (default 7). To see a knowledge base change right
+  away, clear the cache (`POST /task-cache/clear` with the admin token). For evaluation
+  runs, set `ACES_ANSWER_CACHE_HOURS=0` so no test is scored on a cached answer.
 
 ## Running it
 
@@ -167,7 +172,9 @@ All settings are environment variables. Only the first group is needed to start.
 | `ACES_SQL_TOOLS_ENABLED`, `ACES_SQL_SERVER`, `ACES_SQL_DATABASE`, `ACES_SQL_AUTH`, `ACES_SQL_USER`, `ACES_SQL_PASSWORD`, `ACES_SQL_TRUST_SERVER_CERT` | ACES database connection. The options are explained at the top of `aces_sql_tools.py`. |
 | `ACES_CHAT_PROVIDER`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `ANTHROPIC_API_KEY`, `ACES_ANTHROPIC_WORKSPACE_ID` | Chat model. The options are explained at the top of `aces_chat.py`. |
 | `ACES_PUBLIC_BASE_URL` | This server's public address, for CustomGPT file download links. On App Service it defaults to the app's host name; with neither, file links are skipped. |
-| `TASK_CACHE_FILE` | Default `/tmp/aces_task_cache.json`. On App Service, point it at `/home/...` so it survives restarts. |
+| `TASK_CACHE_FILE` | Default: `aces_task_cache.json` in the system temp folder (`/tmp` in the container, `%TEMP%` on Windows). On App Service, point it at `/home/...` so it survives restarts. |
+| `ACES_ANSWER_CACHE_HOURS` | Default 24. How long a finished specialist answer is reused for the same question. `0` turns reuse off; use that for evaluation runs so every question reaches the specialist. |
+| `ACES_TASK_CACHE_KEEP_DAYS` | Default 7. Cache entries untouched this long are dropped when the cache is saved. |
 | `UPC_ROUTER_URL` | Address of the field route planner. |
 
 Less common settings (poll intervals, task time limits, ArcGIS search sizes, HomeHarvest
