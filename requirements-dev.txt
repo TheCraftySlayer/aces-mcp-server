@@ -1,0 +1,7 @@
+# For running the tests and the linter. Not installed in the server image.
+#   python -m pip install -r requirements-dev.txt
+#   python -m pytest
+#   python -m ruff check .
+-r requirements.txt
+pytest==9.2.0
+ruff==0.17.3
