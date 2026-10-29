@@ -11,10 +11,10 @@ Row status in aces_facts.json:
   draft     sourced but not signed off. Listed, but not used as a check.
   open      a question nobody has settled. The chat says so instead of answering.
 """
+
 import datetime as dt
 import json
 import os
-from typing import Optional
 
 FACTS_PATH = os.getenv(
     "ACES_FACTS_PATH",
@@ -55,7 +55,7 @@ def _overdue(f, today):
     return (today - d).days > REVIEW_MAX_DAYS
 
 
-def key_facts(topic: str = "", tax_year: Optional[int] = None, today: Optional[dt.date] = None) -> str:
+def key_facts(topic: str = "", tax_year: int | None = None, today: dt.date | None = None) -> str:
     today = today or dt.date.today()
     topics, facts = _load()
     t = (topic or "").strip().lower()
@@ -77,10 +77,14 @@ def key_facts(topic: str = "", tax_year: Optional[int] = None, today: Optional[d
     if tax_year is not None and year_rows:
         this_year = [f for f in year_rows if f.get("tax_year") == tax_year]
         if not this_year:
-            out.append(f"No figure on file for tax year {tax_year}. Don't give one. Say it isn't published or confirmed yet.")
+            out.append(
+                f"No figure on file for tax year {tax_year}. Don't give one. Say it isn't published or confirmed yet."
+            )
         elif not any(_status(f) == "reviewed" for f in this_year):
-            out.append(f"The tax year {tax_year} figure isn't signed off yet. If you give the specialist's figure, "
-                       "say it hasn't been checked against reviewed facts.")
+            out.append(
+                f"The tax year {tax_year} figure isn't signed off yet. If you give the specialist's figure, "
+                "say it hasn't been checked against reviewed facts."
+            )
 
     if reviewed:
         out.append("\nREVIEWED (use these over any specialist figure that differs)")
@@ -104,7 +108,9 @@ def key_facts(topic: str = "", tax_year: Optional[int] = None, today: Optional[d
         for f in draft:
             out.append(f"- [{f['id']}] {f['fact']}")
 
-    print(f"[aces] key facts topic={t!r} tax_year={tax_year} reviewed={len(reviewed)} open={len(open_)} draft={len(draft)}")
+    print(
+        f"[aces] key facts topic={t!r} tax_year={tax_year} reviewed={len(reviewed)} open={len(open_)} draft={len(draft)}"
+    )
     return "\n".join(out)
 
 
@@ -116,5 +122,5 @@ def register(mcp):
         topics = ["(facts file unreadable)"]
 
     @mcp.tool(name="ACES_Key_Facts", description=DESCRIPTION.format(topics="; ".join(topics)))
-    def ACES_Key_Facts(topic: str = "", tax_year: Optional[int] = None) -> str:
+    def ACES_Key_Facts(topic: str = "", tax_year: int | None = None) -> str:
         return key_facts(topic, tax_year)

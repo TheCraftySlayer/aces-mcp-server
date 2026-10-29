@@ -1,16 +1,26 @@
 # Starts the A.C.E.S. server on this PC and opens the chat in your browser.
-# Run it through start-aces.bat.
-#   start-aces.bat           uses the Azure ACES_Test database
-#   start-aces.bat onprem    uses the county database (ASRCustomerService on asbcdbbernt)
-#   add "reset" to either one to re-enter the saved secrets
+# Run it through start-aces.bat (double-click it, or the desktop shortcut).
+#   start-aces.bat            county database (ASRCustomerService on asbcdbbernt)
+#   start-aces.bat azure      Azure ACES_Test database instead
+#   start-aces.bat shortcut   also puts an "A.C.E.S. Server" shortcut on your desktop
+#   start-aces.bat reset      re-enter the saved secrets
+# Options combine, e.g. start-aces.bat azure reset. "onprem" still works; it's the default now.
+# If the server is already running, this restarts it.
 
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Options = @())
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
+# Which database a plain double-click uses: "onprem" or "azure".
+# The test Azure subscription is off for now, so the county database is the default.
+$defaultTarget = "onprem"
+
 $port = 10000
 $secretFile = Join-Path $env:LOCALAPPDATA "ACES\local-secrets.xml"
+# Records which requirements.txt and Python the packages were last installed for,
+# so pip only runs when one of them changes.
+$packagesStamp = Join-Path $env:LOCALAPPDATA "ACES\packages-stamp.txt"
 
 # County on-prem database, used with "start-aces.bat onprem".
 # ASR_CS_User can read and change every table. That's acceptable for a test on this PC,
@@ -53,13 +63,32 @@ function Stop-WithMessage([string]$message) {
 
 # --- Options ------------------------------------------------------------------
 
-$reset   = $Options -contains "reset"
-$onPrem  = $Options -contains "onprem"
-$unknown = @($Options | Where-Object { $_ -and ($_ -notin @("reset", "onprem")) })
+$Options  = @($Options | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() })
+$reset    = $Options -contains "reset"
+$shortcut = $Options -contains "shortcut"
+$unknown  = @($Options | Where-Object { $_ -notin @("reset", "onprem", "azure", "shortcut") })
 if ($unknown.Count -gt 0) {
-    Stop-WithMessage "Unknown option: $($unknown -join ', '). Use onprem, reset, or both."
+    Stop-WithMessage "Unknown option: $($unknown -join ', '). Use azure, shortcut, reset, or leave it blank for the county database."
 }
+if (($Options -contains "onprem") -and ($Options -contains "azure")) {
+    Stop-WithMessage "Pick one database: onprem or azure, not both."
+}
+$onPrem = if ($Options -contains "azure") { $false } elseif ($Options -contains "onprem") { $true } else { $defaultTarget -eq "onprem" }
 $target = if ($onPrem) { "county on-prem ($onPremSqlDatabase on $onPremSqlServer)" } else { "Azure (ACES_Test on test-aces2)" }
+
+# --- Desktop shortcut (start-aces.bat shortcut) ------------------------------------
+
+if ($shortcut) {
+    $shortcutName = if ($onPrem) { "A.C.E.S. Server" } else { "A.C.E.S. Server (Azure)" }
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "$shortcutName.lnk"
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+    $link.TargetPath       = Join-Path $PSScriptRoot "start-aces.bat"
+    $link.Arguments        = $(if ($onPrem) { "" } else { "azure" })
+    $link.WorkingDirectory = $PSScriptRoot
+    $link.Description      = "Start the A.C.E.S. server and open the chat"
+    $link.Save()
+    Write-Host "Put '$shortcutName' on your desktop. It points at this folder, so run 'start-aces.bat shortcut' again if you move the folder."
+}
 
 # --- Checks -------------------------------------------------------------------
 
@@ -69,8 +98,39 @@ foreach ($file in @("server.py", "aces_sql_tools.py", "aces_chat.py", "aces_char
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Stop-WithMessage "Python isn't on your PATH. Install Python or open a window where 'python' works."
 }
-if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
-    Stop-WithMessage "Something is already using port $port, probably an older server window. Close it and run this again."
+
+# Already running from an earlier start? Stop that server and its window so this run starts fresh
+# (each run gets a new access key, so an old server can't be reopened anyway).
+# Anything else on the port is left alone.
+$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($listener) {
+    $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)" -ErrorAction SilentlyContinue
+    $isAces = $false
+    try { $isAces = ((Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 2).service -eq "aces-mcp-server") } catch { }
+    if (-not $isAces -and $owner -and $owner.CommandLine -match 'server\.py') { $isAces = $true }
+    if (-not $isAces) {
+        $ownerName = if ($owner) { $owner.Name } else { "process $($listener.OwningProcess)" }
+        Stop-WithMessage "Port $port is in use by $ownerName, which isn't A.C.E.S. Close it and run this again."
+    }
+
+    Write-Host "A.C.E.S. is already running. Restarting it..."
+    $toStop = @($listener.OwningProcess)
+    # Walk up to the server window (powershell running "python server.py"), stopping at anything else.
+    $parentId = if ($owner) { $owner.ParentProcessId } else { 0 }
+    for ($i = 0; $i -lt 3 -and $parentId; $i++) {
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $parentId" -ErrorAction SilentlyContinue
+        if (-not $parent -or $parent.CommandLine -notmatch 'server\.py') { break }
+        $toStop += $parent.ProcessId
+        $parentId = $parent.ParentProcessId
+    }
+    foreach ($id in $toStop) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+
+    $freed = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { $freed = $true; break }
+    }
+    if (-not $freed) { Stop-WithMessage "The old server didn't stop. Close its window and run this again." }
 }
 
 # --- Secrets: saved once, encrypted so only your Windows account on this PC can read them ---
@@ -149,11 +209,20 @@ if ($changed) {
     $saved | Export-Clixml $secretFile
 }
 
-# --- Dependencies (quick when already installed) ---------------------------------
+# --- Dependencies: pip only runs when requirements.txt or Python changed -------------
 
-Write-Host "Checking Python packages..."
-python -m pip install -q --disable-pip-version-check -r requirements.txt
-if ($LASTEXITCODE -ne 0) { Stop-WithMessage "pip couldn't install the requirements. See the message above." }
+$pythonInfo = (& python -c "import sys; print(sys.executable, sys.version.split()[0])") -join " "
+$wantStamp  = (Get-FileHash requirements.txt -Algorithm SHA256).Hash + " " + $pythonInfo
+$haveStamp  = if (Test-Path $packagesStamp) { (Get-Content $packagesStamp -Raw).Trim() } else { "" }
+if ($haveStamp -eq $wantStamp) {
+    Write-Host "Python packages are up to date."
+} else {
+    Write-Host "Installing Python packages (only needed when requirements.txt or Python changes)..."
+    python -m pip install -q --disable-pip-version-check -r requirements.txt
+    if ($LASTEXITCODE -ne 0) { Stop-WithMessage "pip couldn't install the requirements. See the message above." }
+    New-Item -ItemType Directory -Force -Path (Split-Path $packagesStamp) | Out-Null
+    Set-Content -Path $packagesStamp -Value $wantStamp
+}
 
 # --- Settings for this run --------------------------------------------------------
 # Fresh access key and admin token every run; they stop working when the server stops.
@@ -223,7 +292,9 @@ for ($i = 0; $i -lt 60; $i++) {
     } catch { }
 }
 if ($null -eq $health) {
-    Stop-WithMessage "The server didn't start within 45 seconds. Check the server window for the error."
+    # In case a package is missing or broken, make the next run reinstall them.
+    Remove-Item $packagesStamp -ErrorAction SilentlyContinue
+    Stop-WithMessage "The server didn't start within 45 seconds. Check the server window for the error. The next run reinstalls the Python packages in case that's the cause."
 }
 
 Write-Host ""

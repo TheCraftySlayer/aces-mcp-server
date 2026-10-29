@@ -1,0 +1,207 @@
+# A.C.E.S. MCP server
+
+Internal tool server for Bernalillo County Assessor's Office staff. It gives staff one
+place to ask questions and get answers from the office's specialist chatbots, the ACES
+database, public parcel data and a reviewed facts file.
+
+It serves the same tools two ways:
+
+- **MCP** at `/mcp`, for the Copilot Studio staff agent and CustomGPT.
+- **A staff chat page** at `/ui`. The server runs the conversation with a chat model,
+  which picks the tools to call.
+
+Everything is read-only. No tool writes to iasWorld, the ACES database or any county
+system.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    staff[Staff browser /ui] -->|POST /chat| server
+    copilot[Copilot Studio agent] -->|MCP /mcp| server
+    pa[Power Automate flows] -->|REST, admin token| server
+    server[server.py] --> customgpt[CustomGPT specialist agents]
+    server --> arcgis[Public BernCo ArcGIS parcel layer]
+    server --> sql[(ACES database, ai_api procedures)]
+    server --> facts[aces_facts.json]
+    server -->|chat only| model[Azure OpenAI or Anthropic]
+```
+
+| File | What it does |
+|---|---|
+| `server.py` | The app: settings, access control, the CustomGPT specialist tools, the ArcGIS parcel tools, the UPC route link, REST wrappers for Power Automate, and admin debug routes. |
+| `aces_sql_tools.py` | The 10 read-only ACES data tools. Each calls fixed stored procedures in the `ai_api` schema with bound parameters. |
+| `aces_chat.py` | `POST /chat`: the tool loop behind the staff chat page, for either Azure OpenAI or Anthropic. |
+| `aces_charts.py` | `Build_Chart`, a chat-only tool. It reads every chart value from a data tool result already in the conversation, never from the model. |
+| `aces_facts.py`, `aces_facts.json` | `ACES_Key_Facts`: staff-reviewed figures, deadlines and citations. |
+| `web_ui.html` | The staff chat page. |
+| `start-aces.bat`, `start-aces.ps1` | Starts the server on a Windows PC and opens the chat. |
+| `deploy.ps1` | Builds and deploys the container to Azure App Service, with checks and automatic rollback. |
+| `Dockerfile` | Container image: Python 3.12 plus Microsoft ODBC Driver 18. |
+| `sql/` | Database changes for the `ai_api` procedures, numbered in the order they were applied. |
+| `tests/` | Tests that run without any network or database. |
+| `examples/` | Sample MCP requests. |
+
+## Tools
+
+| Tool | Source | Notes |
+|---|---|---|
+| `Community_Educator` | CustomGPT 9262 | Public-facing process, exemptions, notices, protests, forms. |
+| `Assessment_Context_Expert` | CustomGPT 94006 | Record interpretation and assessment context. Slow; may return a task ID. |
+| `Clear_Expectations` | CustomGPT 49501 | Staff, HR, training and internal policy. |
+| `Compliance_Expert` | CustomGPT 37400 | Legal and statutory questions. |
+| `Smart_Tasks` | CustomGPT 9262 (Plan & Act) | Multi-step work: files, analysis, exports. |
+| `Check_CustomGPT_Task` | CustomGPT | Picks up a specialist answer that wasn't ready yet. |
+| `ArcGIS_Public_Parcel_Lookup` | Public BernCo ArcGIS | Parcel lookup by address, UPC or owner. |
+| `ArcGIS_Public_Parcel_Map` | Public BernCo ArcGIS | Assessor map and Google Maps links. |
+| `ArcGIS_Public_Candidate_Peers` | Public BernCo ArcGIS | Possible comparable parcels from public GIS fields only. |
+| `UPC_Router_Link` | No outside call | Link that opens the field route planner with the UPCs filled in. |
+| `ACES_Key_Facts` | `aces_facts.json` | Reviewed facts. See below. |
+| `ACES_Office_Volume` | ACES database | Calls and walk-in visits by day, week or month. |
+| `ACES_Forecast` | ACES database | Daily call and visit forecast with 80% and 95% ranges. |
+| `ACES_Forecast_Accuracy` | ACES database | How past forecasts did. |
+| `ACES_Season_Outlook` | ACES database | Day-by-day outlook for known busy seasons. |
+| `ACES_Assessment_Calendar` | ACES database | Assessment-calendar dates and their effect on volume. |
+| `ACES_Daily_Briefing` | ACES database | Forecast, last open day, deeds and calendar in one call. |
+| `ACES_Deed_Volume` | ACES database | Recorded deed volume. |
+| `ACES_NOV_Parcel` | ACES database | Notice of Value details for one UPC. |
+| `ACES_NOV_Search` | ACES database | Finds UPCs by street address. |
+| `ACES_NOV_Coverage` | ACES database | Share of 3%+ increases with an explained reason. |
+
+The SQL tools register only when `ACES_SQL_TOOLS_ENABLED=true` and the connection
+settings are present. Without them the server lists 11 tools.
+
+## Access control
+
+| Route | Who can call it |
+|---|---|
+| `/mcp`, `/chat` | Callers with the MCP access key (`x-aces-mcp-key` header or `Authorization: Bearer`), or a county user signed in through App Service authentication (only the accounts in `ACES_ALLOWED_USERS`, when it's set). With no key configured, key callers get 503. |
+| `/start-lookup`, `/check-pending-task`, `/smart-task`, `/agent-call`, `/data-tool`, `/arcgis-*` | Power Automate, with the admin token in the `x-aces-admin-token` header. |
+| `/task-cache`, `/task-cache/clear`, `/check-task` | Admin token only. Off when no admin token is set. |
+| `/context-expert-file/{token}` | Anyone with the link. Tokens are random and expire (`ACES_FILE_LINK_TTL_SECONDS`, default one day). |
+| `/`, `/health`, `/ui` | Open. They return no data. `/ui` itself sends signed-out users to the county sign-in when sign-in is on. |
+
+Points a reviewer usually asks about:
+
+- **Key comparisons** use `secrets.compare_digest`. Tokens are read from headers only,
+  never the query string, so they don't land in access logs.
+- **Sign-in headers are trusted only when App Service authentication is really on**:
+  `ACES_ENTRA_SIGNIN=true` *and* `WEBSITE_AUTH_ENABLED=true`. App Service sets the
+  second one itself and strips client-sent `X-MS-CLIENT-PRINCIPAL*` headers. If
+  authentication is turned off, the server falls back to the access key, so the headers
+  can't be faked.
+- **The chat page** is served with a per-request CSP nonce, `default-src 'none'`,
+  `frame-ancestors 'none'` and `no-store`. The local launcher passes the access key in
+  the URL fragment, which never reaches the server. The page keeps it in that tab's
+  sessionStorage and clears it from the address bar.
+- **SQL**: procedure names are constants and every input is a bound parameter. There's
+  no free-form SQL. The production login (the App Service managed identity) can only
+  EXECUTE the `ai_api` schema, and each procedure logs its own calls to
+  `ai_api.tool_log`.
+- **Secrets** live only in app settings or, for local runs, in a DPAPI-encrypted file
+  under `%LOCALAPPDATA%\ACES`. Nothing secret is in the repo or its history.
+
+## What data goes where
+
+- **Chat**: staff questions and the tool results needed to answer them go to the
+  configured model. With Azure OpenAI that's the county's own Azure tenant, sent with
+  `store=false`. With Anthropic it's the Anthropic API. Prompts and answers aren't
+  written to the server log. The log gets tool names, timings, token counts, the length
+  and a hash of each specialist question and, with sign-in on, the user's sign-in name.
+- **Specialist tools**: the question goes to CustomGPT for that agent's project.
+- **ArcGIS tools**: queries go to the county's public parcel layer.
+- **Task cache** (`TASK_CACHE_FILE`): task IDs, hashes of prompts (not the text) and
+  the specialists' answers, so a repeated question doesn't start a second CustomGPT task.
+
+## Running it
+
+### On a Windows PC
+
+Double-click `start-aces.bat`. The first run asks for the secrets and saves them
+encrypted for your Windows account. It then starts the server on `127.0.0.1:10000` and
+opens the chat. Run `start-aces.bat` from a command prompt with `azure`, `shortcut` or
+`reset` for the other options; the comments at the top of `start-aces.ps1` explain
+each one.
+
+Needs Python 3.11 or later, plus Microsoft ODBC Driver 18 for SQL Server for the data
+tools.
+
+### In a container
+
+```
+docker build -t aces-mcp .
+docker run -p 8000:8000 -e ACES_MCP_API_KEY=... aces-mcp
+```
+
+### Deploying to Azure App Service
+
+`.\deploy.ps1` from the repo folder. It refuses to deploy uncommitted or unpushed code,
+then compiles, runs the tests, starts the server locally and checks that every tool
+lists. Only after that does it build in ACR and switch the app to the new image. If
+`/health` and `/mcp` don't come up on the new build, it rolls back. After a deploy,
+refresh the MCP tool in Copilot Studio so it picks up any description changes.
+
+## Settings
+
+All settings are environment variables. Only the first group is needed to start.
+
+| Setting | Purpose |
+|---|---|
+| `ACES_MCP_API_KEY` | Access key for `/mcp` and `/chat`. |
+| `ACES_ADMIN_TOKEN` | Turns on the REST wrappers and admin routes. |
+| `HOST`, `PORT` | Defaults `0.0.0.0` and `10000`. Local runs use `127.0.0.1`. |
+| `ACES_ENTRA_SIGNIN`, `ACES_ALLOWED_USERS` | County sign-in on Azure, and the comma-separated list of accounts allowed in. |
+| `CUSTOMGPT_API_TOKEN` | CustomGPT API token. |
+| `COMMUNITY_PROJECT_ID`, `ASSESSMENT_PROJECT_ID`, `CLEAR_PROJECT_ID`, `COMPLIANCE_PROJECT_ID`, `SMART_TASKS_PROJECT_ID` | CustomGPT project for each specialist. |
+| `ACES_SQL_TOOLS_ENABLED`, `ACES_SQL_SERVER`, `ACES_SQL_DATABASE`, `ACES_SQL_AUTH`, `ACES_SQL_USER`, `ACES_SQL_PASSWORD`, `ACES_SQL_TRUST_SERVER_CERT` | ACES database connection. The options are explained at the top of `aces_sql_tools.py`. |
+| `ACES_CHAT_PROVIDER`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `ANTHROPIC_API_KEY`, `ACES_ANTHROPIC_WORKSPACE_ID` | Chat model. The options are explained at the top of `aces_chat.py`. |
+| `ACES_PUBLIC_BASE_URL` | This server's public address, for CustomGPT file download links. On App Service it defaults to the app's host name; with neither, file links are skipped. |
+| `TASK_CACHE_FILE` | Default `/tmp/aces_task_cache.json`. On App Service, point it at `/home/...` so it survives restarts. |
+| `UPC_ROUTER_URL` | Address of the field route planner. |
+
+Less common settings (poll intervals, task time limits, ArcGIS search sizes, HomeHarvest
+behavior) are listed with their defaults near the top of `server.py`.
+
+## Reviewed facts
+
+`aces_facts.json` holds figures that someone has signed off on. A row counts as
+`reviewed` only when it also has `reviewed_by` and `last_reviewed`. Rows marked `draft`
+are listed but never used as a check, and `open` rows make the chat say the question
+isn't settled. A reviewed row older than `ACES_FACTS_REVIEW_DAYS` (default 365) is
+flagged as overdue. Every change to the file goes through a commit, and
+`tests/test_facts.py` checks the file's shape.
+
+## Tests and lint
+
+```
+python -m pip install -r requirements-dev.txt
+python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+```
+
+The tests run the real app in-process with dummy settings and a scripted chat model, so
+they reach no network or database. They cover the tool list, access control on every
+route group, the chat page headers, input checks on the SQL tools, the facts rules, the
+chart builder and the chat tool loop. They don't make live calls to CustomGPT, ArcGIS
+or SQL. After a deploy, `deploy.ps1` checks that the new build is healthy and lists
+every tool; live answers are checked by hand.
+
+## Database changes
+
+`sql/` holds changes to the `ai_api` procedures, numbered in the order they were
+applied. Objects created before this folder existed (numbers below 51) aren't here.
+Their current definitions are in the database snapshot in the ACES forecasting repo
+(`ACES_DotNet_Source`, `database/`).
+
+## Known gaps
+
+- **`server.py` is about 4,500 lines.** The plan is to split it by area (CustomGPT
+  client, ArcGIS, REST wrappers, access control) once there are tests around the live
+  CustomGPT and ArcGIS paths, so the split can be checked against real behavior.
+- **The facts signing script, `sign_facts.py`, isn't in the repo yet.**
+- **The on-prem test login** (`start-aces.bat` with the county database) can change
+  every table. A login limited to EXECUTE on `ai_api` is needed before the server runs
+  on a county server around the clock.
+- **One maintainer.** A second person who can deploy, rotate keys and update the facts
+  file hasn't been named yet.

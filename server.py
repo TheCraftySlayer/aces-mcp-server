@@ -1,20 +1,16 @@
-import os
-import json
-import re
 import asyncio
-import hashlib
-import time
-import secrets
 import base64
+import hashlib
+import json
+import os
+import re
+import secrets
+import time
+from datetime import UTC, datetime
 from html import escape as html_escape
-from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import quote_plus
-from typing import Optional, Any, Dict, List, Tuple
-
-try:
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover - Python < 3.9 fallback
-    ZoneInfo = None
+from zoneinfo import ZoneInfo
 
 # FastMCP reads these through settings/env for Streamable HTTP behavior.
 os.environ.setdefault("FASTMCP_STATELESS_HTTP", "true")
@@ -26,10 +22,9 @@ from fastmcp.exceptions import ToolError
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
-import aces_sql_tools
-import aces_facts
 import aces_chat
-
+import aces_facts
+import aces_sql_tools
 
 # Describe the SQL data tools to the model only when they will actually register.
 _SQL_TOOLS_NOTE = (
@@ -47,10 +42,10 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes ten tools: Community_Educator, Assessment_Context_Expert, "
+        "Exposes these tools: Community_Educator, Assessment_Context_Expert, "
         "Clear_Expectations, Compliance_Expert, Smart_Tasks, Check_CustomGPT_Task, "
         "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, ArcGIS_Public_Candidate_Peers, "
-        "and UPC_Router_Link. "
+        "UPC_Router_Link and ACES_Key_Facts. "
         "The five CustomGPT specialist tools take exactly one promptText string and return plain text. "
         "Community_Educator uses CustomGPT Plan & Act task mode because project 9262 has Plan & Act enabled. "
         "Smart_Tasks submits to CustomGPT project 9262 using Plan & Act task mode for Smart Tasks, code, file, dashboard, and multi-step work. "
@@ -59,8 +54,10 @@ mcp = FastMCP(
         "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
         "ArcGIS_Public_Candidate_Peers returns ArcGIS-only candidate parcel peers for comp triage when living area/sale data is unavailable in GIS. "
         "UPC_Router_Link takes a list of UPCs and returns a link that opens the field route planner with them filled in. "
-        "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
-    ) + _SQL_TOOLS_NOTE,
+        "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context. "
+        "ACES_Key_Facts returns staff-reviewed figures, deadlines and citations from a reviewed file."
+    )
+    + _SQL_TOOLS_NOTE,
 )
 
 
@@ -69,7 +66,7 @@ aces_facts.register(mcp)
 
 CUSTOMGPT_API_TOKEN = os.getenv("CUSTOMGPT_API_TOKEN", "").strip()
 
-# Set these in Render Environment.
+# Set these in the app settings (or the launcher, for local runs).
 COMMUNITY_PROJECT_ID = os.getenv("COMMUNITY_PROJECT_ID", "").strip()
 ASSESSMENT_PROJECT_ID = os.getenv("ASSESSMENT_PROJECT_ID", "94006").strip()
 CLEAR_PROJECT_ID = os.getenv("CLEAR_PROJECT_ID", "").strip()
@@ -78,21 +75,27 @@ COMPLIANCE_PROJECT_ID = os.getenv("COMPLIANCE_PROJECT_ID", "").strip()
 # CustomGPT project/agent with Plan & Act + Smart Tasks enabled.
 SMART_TASKS_PROJECT_ID = os.getenv("SMART_TASKS_PROJECT_ID", "9262").strip()
 SMART_TASKS_POLL_SECONDS = int(os.getenv("ACES_SMART_TASKS_POLL_SECONDS", "90"))
-SMART_TASKS_AGENT_CAPABILITY = os.getenv(
-    "ACES_SMART_TASKS_AGENT_CAPABILITY",
-    "complex-tasks",
-).strip() or "complex-tasks"
-SMART_TASKS_RESPONSE_SOURCE = os.getenv(
-    "ACES_SMART_TASKS_RESPONSE_SOURCE",
-    "default",
-).strip() or "default"
+SMART_TASKS_AGENT_CAPABILITY = (
+    os.getenv(
+        "ACES_SMART_TASKS_AGENT_CAPABILITY",
+        "complex-tasks",
+    ).strip()
+    or "complex-tasks"
+)
+SMART_TASKS_RESPONSE_SOURCE = (
+    os.getenv(
+        "ACES_SMART_TASKS_RESPONSE_SOURCE",
+        "default",
+    ).strip()
+    or "default"
+)
 
 # HomeHarvest External API action ID inside CustomGPT project 94006.
 HOMEHARVEST_ACTION_ID = os.getenv("HOMEHARVEST_ACTION_ID", "7").strip()
 
 # Public Bernalillo County Assessor parcel layer.
 # Default is the richer BernCo public MapServer layer. You can override this
-# with ARCGIS_PUBLIC_PARCEL_LAYER_URL in Render if GIS publishes a new URL.
+# with ARCGIS_PUBLIC_PARCEL_LAYER_URL if GIS publishes a new URL.
 ARCGIS_PUBLIC_PARCEL_LAYER_URL = os.getenv(
     "ARCGIS_PUBLIC_PARCEL_LAYER_URL",
     "https://assessormap.bernco.gov/server/rest/services/GIS/Assessor_Parcels_Public/MapServer/0",
@@ -119,19 +122,19 @@ BERNCO_EXPERIENCE_DATA_SOURCE_ID = os.getenv(
 
 # Assessor Property Route Planner (UPC Router). UPC_Router_Link builds
 # "<url>#upcs=<UPC>,<UPC>" links; the planner fills its UPC box from the hash.
-UPC_ROUTER_URL = (
-    os.getenv("UPC_ROUTER_URL", "").strip()
-    or "https://thecraftyslayer.github.io/upcrouter/"
-)
-UPC_ROUTER_MAX_UPCS = 150      # longer lists should be split into separate routes
+UPC_ROUTER_URL = os.getenv("UPC_ROUTER_URL", "").strip() or "https://thecraftyslayer.github.io/upcrouter/"
+UPC_ROUTER_MAX_UPCS = 150  # longer lists should be split into separate routes
 UPC_ROUTER_ROAD_TIME_LIMIT = 44  # the planner's road-time ordering limit; above this it orders by proximity
 
 # When true, Assessment_Context_Expert HomeHarvest/address/comps tasks are
 # pre-enriched with public ArcGIS parcel context before the CustomGPT task is
 # submitted. This lets HomeHarvest use the GIS subject parcel as an anchor.
-ENRICH_HOMEHARVEST_WITH_ARCGIS = os.getenv(
-    "ACES_ENRICH_HOMEHARVEST_WITH_ARCGIS", "true"
-).strip().lower() not in {"0", "false", "no", "off"}
+ENRICH_HOMEHARVEST_WITH_ARCGIS = os.getenv("ACES_ENRICH_HOMEHARVEST_WITH_ARCGIS", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 # Admin token for the REST wrapper routes and /task-cache, /check-task.
 # Accepted only in the x-aces-admin-token header (never the URL, which ends up in access logs).
@@ -143,22 +146,27 @@ ACES_MCP_API_KEY = os.getenv("ACES_MCP_API_KEY", "").strip()
 
 CUSTOMGPT_BASE = os.getenv("CUSTOMGPT_BASE", "https://app.customgpt.ai/api/v1").rstrip("/")
 
-# Render filesystem is ephemeral. This cache survives while the instance is alive,
-# but may reset after redeploy/cold start. Always return Task ID + Project ID for
-# unfinished tasks so Check_CustomGPT_Task can poll CustomGPT directly.
+# The default /tmp location doesn't survive a container restart (on Azure, point this at
+# /home/... to keep it). Always return Task ID + Project ID for unfinished tasks so
+# Check_CustomGPT_Task can poll CustomGPT directly even after the cache resets.
 TASK_CACHE_FILE = os.getenv("TASK_CACHE_FILE", "/tmp/aces_task_cache.json")
 
 # Generated Context Expert / CustomGPT artifact links.
-# Set ACES_PUBLIC_BASE_URL to your Render public URL, for example:
-#   https://aces-mcp-server.onrender.com
-# The server returns staff-safe download links that proxy through Render without
-# exposing the CustomGPT API token to Copilot/Teams users.
-CONTEXT_EXPERT_FILE_LINKS_ENABLED = os.getenv(
-    "ACES_CONTEXT_EXPERT_FILE_LINKS_ENABLED", "true"
-).strip().lower() not in {"0", "false", "no", "off"}
-PUBLIC_BASE_URL = os.getenv(
-    "ACES_PUBLIC_BASE_URL",
-    os.getenv("PUBLIC_BASE_URL", "https://aces-mcp-server.onrender.com"),
+# The server returns staff-safe download links that proxy through this server without
+# exposing the CustomGPT API token to Copilot/Teams users. The links need this server's
+# public address: ACES_PUBLIC_BASE_URL if set, otherwise the App Service host name
+# (WEBSITE_HOSTNAME, set by Azure). With neither, file links are skipped.
+CONTEXT_EXPERT_FILE_LINKS_ENABLED = os.getenv("ACES_CONTEXT_EXPERT_FILE_LINKS_ENABLED", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+_WEBSITE_HOSTNAME = os.getenv("WEBSITE_HOSTNAME", "").strip()
+PUBLIC_BASE_URL = (
+    os.getenv("ACES_PUBLIC_BASE_URL", "").strip()
+    or os.getenv("PUBLIC_BASE_URL", "").strip()
+    or (f"https://{_WEBSITE_HOSTNAME}" if _WEBSITE_HOSTNAME else "")
 ).rstrip("/")
 FILE_LINK_CACHE_FILE = os.getenv("ACES_FILE_LINK_CACHE_FILE", "/tmp/aces_file_link_cache.json")
 FILE_LINK_TTL_SECONDS = int(os.getenv("ACES_FILE_LINK_TTL_SECONDS", "86400"))
@@ -180,16 +188,27 @@ MAX_CACHED_ANSWER_CHARS = int(os.getenv("ACES_MAX_CACHED_ANSWER_CHARS", "80000")
 # Address / HomeHarvest / comps / listing work should usually create a fresh
 # CustomGPT task. Otherwise Copilot can appear to call the MCP tool while the
 # server returns an old cached answer in ~0.25 seconds.
-FRESH_HOMEHARVEST_LOOKUPS = os.getenv("ACES_FRESH_HOMEHARVEST_LOOKUPS", "true").strip().lower() not in {"0", "false", "no", "off"}
+FRESH_HOMEHARVEST_LOOKUPS = os.getenv("ACES_FRESH_HOMEHARVEST_LOOKUPS", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 # Set this to "true" only if you want exact repeated HomeHarvest prompts to reuse
 # completed cached answers. The safer default for staff testing is false.
-REUSE_COMPLETED_HOMEHARVEST_ANSWERS = os.getenv("ACES_REUSE_COMPLETED_HOMEHARVEST_ANSWERS", "false").strip().lower() in {"1", "true", "yes", "on"}
+REUSE_COMPLETED_HOMEHARVEST_ANSWERS = os.getenv(
+    "ACES_REUSE_COMPLETED_HOMEHARVEST_ANSWERS", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Optional: allow reuse of in-flight HomeHarvest tasks so repeated "check again"
 # style calls do not spawn duplicate CustomGPT tasks while the first task is still running.
-REUSE_RUNNING_HOMEHARVEST_TASKS = os.getenv("ACES_REUSE_RUNNING_HOMEHARVEST_TASKS", "true").strip().lower() in {"1", "true", "yes", "on"}
-
+REUSE_RUNNING_HOMEHARVEST_TASKS = os.getenv("ACES_REUSE_RUNNING_HOMEHARVEST_TASKS", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _now_iso() -> str:
@@ -199,14 +218,13 @@ def _now_iso() -> str:
 def _today_mountain_date():
     """Return today's date in America/Denver, falling back safely to UTC."""
     try:
-        if ZoneInfo is not None:
-            return datetime.now(ZoneInfo("America/Denver")).date()
-    except Exception:
+        return datetime.now(ZoneInfo("America/Denver")).date()
+    except Exception:  # no time zone data (tzdata missing on Windows)
         pass
-    return datetime.now(timezone.utc).date()
+    return datetime.now(UTC).date()
 
 
-def _past_years_date_range(years: int = 10) -> Tuple[str, str]:
+def _past_years_date_range(years: int = 10) -> tuple[str, str]:
     """Return YYYY-MM-DD date_from/date_to for a rolling lookback window."""
     today = _today_mountain_date()
     years = max(1, int(years or 10))
@@ -218,7 +236,7 @@ def _past_years_date_range(years: int = 10) -> Tuple[str, str]:
     return start.isoformat(), today.isoformat()
 
 
-def _has_any_word_or_phrase(text: str, terms: List[str]) -> bool:
+def _has_any_word_or_phrase(text: str, terms: list[str]) -> bool:
     """Match whole words/phrases so 'comp' does not match 'complete' or 'compliance'."""
     value = re.sub(r"\s+", " ", (text or "").lower()).strip()
     for term in terms:
@@ -237,12 +255,12 @@ def _stable_hash(text: str) -> str:
 
 
 def _log(message: str, **kwargs: Any) -> None:
-    """Small structured-ish logger for Render stdout."""
+    """One-line key=value log to stdout (App Service and the local server window both show it)."""
     details = " ".join(f"{key}={value}" for key, value in kwargs.items() if value is not None)
     print(f"[aces] {message}" + (f" {details}" if details else ""), flush=True)
 
 
-def _error_preview(status_code: int, payload: Any, max_len: int = 1200) -> Optional[str]:
+def _error_preview(status_code: int, payload: Any, max_len: int = 1200) -> str | None:
     """
     Response bodies are logged only on errors. Successful CustomGPT responses echo
     staff prompts and answers, which can contain taxpayer details, so they stay
@@ -253,7 +271,7 @@ def _error_preview(status_code: int, payload: Any, max_len: int = 1200) -> Optio
     return None
 
 
-def _trim_cached_answer(answer: Optional[str]) -> Optional[str]:
+def _trim_cached_answer(answer: str | None) -> str | None:
     if answer is None:
         return None
     text = str(answer)
@@ -290,7 +308,7 @@ def _normalize_cache_text(text: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _extract_label_block(prompt_text: str, label: str, stop_labels: Optional[List[str]] = None) -> str:
+def _extract_label_block(prompt_text: str, label: str, stop_labels: list[str] | None = None) -> str:
     """Extract a labeled section from promptText."""
     text = prompt_text or ""
     stop_labels = stop_labels or []
@@ -394,10 +412,10 @@ def _safe_json_dumps(value: Any, max_len: int = 3000) -> str:
     return text
 
 
-def _load_task_cache() -> Dict[str, Any]:
+def _load_task_cache() -> dict[str, Any]:
     try:
         if os.path.exists(TASK_CACHE_FILE):
-            with open(TASK_CACHE_FILE, "r", encoding="utf-8") as f:
+            with open(TASK_CACHE_FILE, encoding="utf-8") as f:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
                 return loaded
@@ -406,7 +424,7 @@ def _load_task_cache() -> Dict[str, Any]:
     return {}
 
 
-def _save_task_cache(cache: Dict[str, Any]) -> None:
+def _save_task_cache(cache: dict[str, Any]) -> None:
     try:
         with open(TASK_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
@@ -414,13 +432,13 @@ def _save_task_cache(cache: Dict[str, Any]) -> None:
         print(f"[task-cache] save failed: {exc}", flush=True)
 
 
-TASK_CACHE: Dict[str, Any] = _load_task_cache()
+TASK_CACHE: dict[str, Any] = _load_task_cache()
 
 
-def _load_file_link_cache() -> Dict[str, Any]:
+def _load_file_link_cache() -> dict[str, Any]:
     try:
         if os.path.exists(FILE_LINK_CACHE_FILE):
-            with open(FILE_LINK_CACHE_FILE, "r", encoding="utf-8") as f:
+            with open(FILE_LINK_CACHE_FILE, encoding="utf-8") as f:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
                 # Drop expired links on startup/load.
@@ -435,12 +453,13 @@ def _load_file_link_cache() -> Dict[str, Any]:
     return {}
 
 
-def _save_file_link_cache(cache: Dict[str, Any]) -> None:
+def _save_file_link_cache(cache: dict[str, Any]) -> None:
     try:
         # Keep the JSON small by pruning expired entries before every save.
         now = time.time()
         expired = [
-            key for key, value in cache.items()
+            key
+            for key, value in cache.items()
             if not isinstance(value, dict) or float(value.get("expires_at", 0) or 0) <= now
         ]
         for key in expired:
@@ -452,7 +471,7 @@ def _save_file_link_cache(cache: Dict[str, Any]) -> None:
         print(f"[file-link-cache] save failed: {exc}", flush=True)
 
 
-FILE_LINK_CACHE: Dict[str, Any] = _load_file_link_cache()
+FILE_LINK_CACHE: dict[str, Any] = _load_file_link_cache()
 
 
 def _task_cache_key(project_id: str, tool_name: str, prompt_text: str) -> str:
@@ -460,7 +479,7 @@ def _task_cache_key(project_id: str, tool_name: str, prompt_text: str) -> str:
     return f"{project_id}|{tool_name}|{_stable_hash(canonical)}"
 
 
-def _find_task_cache_entry(project_id: str, task_id: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+def _find_task_cache_entry(project_id: str, task_id: str) -> tuple[str | None, dict[str, Any] | None]:
     for key, value in TASK_CACHE.items():
         if not isinstance(value, dict):
             continue
@@ -469,13 +488,13 @@ def _find_task_cache_entry(project_id: str, task_id: str) -> Tuple[Optional[str]
     return None, None
 
 
-def _minutes_since(stamp: Any) -> Optional[float]:
+def _minutes_since(stamp: Any) -> float | None:
     """Minutes since a cache timestamp like 2026-10-15T15:12:01Z, or None if unreadable."""
     try:
-        then = datetime.strptime(str(stamp or ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        then = datetime.strptime(str(stamp or ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     except ValueError:
         return None
-    return (datetime.now(timezone.utc) - then).total_seconds() / 60.0
+    return (datetime.now(UTC) - then).total_seconds() / 60.0
 
 
 def _task_stall_reason(project_id: str, task_id: str) -> str:
@@ -501,7 +520,7 @@ def _cached_answer_for_task(project_id: str, task_id: str) -> str:
     return ""
 
 
-def _find_existing_prompt_task(project_id: str, tool_name: str, prompt_text: str) -> Optional[Dict[str, Any]]:
+def _find_existing_prompt_task(project_id: str, tool_name: str, prompt_text: str) -> dict[str, Any] | None:
     """Return an existing cached task for the same project/tool/semantic prompt."""
     key = _task_cache_key(project_id, tool_name, prompt_text)
     dedupe_hash = _stable_hash(_canonical_prompt_for_cache(tool_name, prompt_text))
@@ -535,11 +554,11 @@ def _remember_task(
     prompt_text: str,
     task_id: str,
     status: str,
-    message_id: Optional[str] = None,
-    latest_status: Optional[str] = None,
-    progress_log: Optional[List[str]] = None,
-    error: Optional[str] = None,
-    answer: Optional[str] = None,
+    message_id: str | None = None,
+    latest_status: str | None = None,
+    progress_log: list[str] | None = None,
+    error: str | None = None,
+    answer: str | None = None,
 ) -> str:
     key = _task_cache_key(project_id, tool_name, prompt_text)
     existing = TASK_CACHE.get(key, {})
@@ -575,7 +594,10 @@ def _remember_task(
 
     TASK_CACHE[key] = existing
     _save_task_cache(TASK_CACHE)
-    print(f"[task-cache] saved tool={tool_name} project={project_id} task_id={task_id} status={status} key={key}", flush=True)
+    print(
+        f"[task-cache] saved tool={tool_name} project={project_id} task_id={task_id} status={status} key={key}",
+        flush=True,
+    )
     return key
 
 
@@ -583,11 +605,11 @@ def _update_task_cache_by_task_id(
     project_id: str,
     task_id: str,
     status: str,
-    latest_status: Optional[str] = None,
-    message_id: Optional[str] = None,
-    progress_log: Optional[List[str]] = None,
-    error: Optional[str] = None,
-    answer: Optional[str] = None,
+    latest_status: str | None = None,
+    message_id: str | None = None,
+    progress_log: list[str] | None = None,
+    error: str | None = None,
+    answer: str | None = None,
 ) -> str:
     key, existing = _find_task_cache_entry(project_id, task_id)
     if not key:
@@ -639,8 +661,6 @@ def _admin_authorized(request) -> bool:
     return secrets.compare_digest(str(supplied_token).encode(), ACES_ADMIN_TOKEN.encode())
 
 
-
-
 def _extract_id_from_text(text: str, label: str) -> str:
     """Extract an ID from a plain-text status block like 'Task ID: ...'."""
     pattern = re.compile(rf"(?im)^\s*{re.escape(label)}\s*:\s*([^\s]+)\s*$")
@@ -653,7 +673,7 @@ def _normalize_aces_result(
     project_id: str = "",
     task_id: str = "",
     default_failed_answer: str = "The lookup did not return usable results.",
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Convert existing MCP/plain-text tool results into the stable JSON contract
     Power Automate/Copilot Studio expects:
@@ -704,7 +724,7 @@ def _normalize_aces_result(
         "task not found",
         "customgpt task not found",
         "task check failed: 404",
-        "http_status\": 404",
+        'http_status": 404',
         "task was consumed",
         "task expired",
         "download link expired",
@@ -754,7 +774,7 @@ def _normalize_aces_result(
     }
 
 
-async def _request_json_or_empty(request) -> Dict[str, Any]:
+async def _request_json_or_empty(request) -> dict[str, Any]:
     """Read JSON safely from Starlette request; return {} for empty/invalid JSON."""
     try:
         data = await request.json()
@@ -775,7 +795,9 @@ def _json_unauthorized(message: str = "Unauthorized. Supply the x-aces-admin-tok
     )
 
 
-def _json_not_configured(message: str = "Set ACES_ADMIN_TOKEN in Render to enable REST wrapper routes.") -> JSONResponse:
+def _json_not_configured(
+    message: str = "Set ACES_ADMIN_TOKEN in the app settings to enable REST wrapper routes.",
+) -> JSONResponse:
     return JSONResponse(
         {
             "status": "failed",
@@ -787,7 +809,7 @@ def _json_not_configured(message: str = "Set ACES_ADMIN_TOKEN in Render to enabl
     )
 
 
-def _require_rest_auth(request) -> Optional[JSONResponse]:
+def _require_rest_auth(request) -> JSONResponse | None:
     """
     Protect Power Automate REST wrapper routes. Put the same token in your
     Power Automate HTTP action headers:
@@ -797,6 +819,18 @@ def _require_rest_auth(request) -> Optional[JSONResponse]:
         return _json_not_configured()
     if not _admin_authorized(request):
         return _json_unauthorized()
+    return None
+
+
+def _require_admin_debug_auth(request) -> JSONResponse | None:
+    """Gate for the admin-only debug routes (task cache, check-task). None means go ahead."""
+    if not ACES_ADMIN_TOKEN:
+        return JSONResponse(
+            {"enabled": False, "message": "Set ACES_ADMIN_TOKEN in the app settings to enable this debug route."},
+            status_code=403,
+        )
+    if not _admin_authorized(request):
+        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
     return None
 
 
@@ -810,7 +844,7 @@ def _require_rest_auth(request) -> Optional[JSONResponse]:
 ARCGIS_PUBLIC_PARCEL_OUT_FIELDS = "*"
 
 
-def _arcgis_request_headers() -> Dict[str, str]:
+def _arcgis_request_headers() -> dict[str, str]:
     """Headers that keep BernCo ArcGIS/Cloudflare from treating server-side REST calls as suspicious."""
     return {
         "User-Agent": "ACES-MCP-Server/1.0 (+Bernalillo County Assessor internal staff tool)",
@@ -873,7 +907,9 @@ def _normalize_arcgis_situs_from_user_text(search_text: str) -> str:
     if not re.match(r"^\d+\s+", value):
         return ""
 
-    suffix_values = set(_ARCGIS_STREET_SUFFIX_REPLACEMENTS.keys()) | set(_ARCGIS_STREET_SUFFIX_REPLACEMENTS.values()) | {"WAY"}
+    suffix_values = (
+        set(_ARCGIS_STREET_SUFFIX_REPLACEMENTS.keys()) | set(_ARCGIS_STREET_SUFFIX_REPLACEMENTS.values()) | {"WAY"}
+    )
     suffix_pattern = "|".join(sorted((re.escape(s) for s in suffix_values), key=len, reverse=True))
 
     # Prefer the first complete street-address span: house number + street + suffix.
@@ -899,7 +935,7 @@ def _normalize_arcgis_situs_from_user_text(search_text: str) -> str:
     return value.strip()
 
 
-def _arcgis_where_candidates(search_text: str) -> List[Tuple[str, str]]:
+def _arcgis_where_candidates(search_text: str) -> list[tuple[str, str]]:
     """
     Return query candidates in safest order: UPC exact, SITUSADD exact,
     full-address prefix, then broad fallback.
@@ -907,7 +943,7 @@ def _arcgis_where_candidates(search_text: str) -> List[Tuple[str, str]]:
     raw = str(search_text or "").strip()
     safe = _clean_arcgis_sql_text(raw)
     compact = _compact_digits(raw)
-    candidates: List[Tuple[str, str]] = []
+    candidates: list[tuple[str, str]] = []
 
     if re.fullmatch(r"[0-9]{12,30}", compact):
         # UPC exists in both public layers. TXTUPC/PIN exist in the richer BernCo MapServer.
@@ -939,7 +975,7 @@ def _arcgis_where_candidates(search_text: str) -> List[Tuple[str, str]]:
 
     # De-dupe while preserving order.
     seen = set()
-    unique: List[Tuple[str, str]] = []
+    unique: list[tuple[str, str]] = []
     for mode, where in candidates:
         if where not in seen:
             seen.add(where)
@@ -947,17 +983,13 @@ def _arcgis_where_candidates(search_text: str) -> List[Tuple[str, str]]:
     return unique
 
 
-def _compact_none_dict(value: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _compact_none_dict(value: dict[str, Any]) -> dict[str, Any] | None:
     """Return a dict without empty/None values, or None if nothing remains."""
-    cleaned = {
-        key: val
-        for key, val in (value or {}).items()
-        if val is not None and val != ""
-    }
+    cleaned = {key: val for key, val in (value or {}).items() if val is not None and val != ""}
     return cleaned or None
 
 
-def _normalize_arcgis_parcel(attrs: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_arcgis_parcel(attrs: dict[str, Any]) -> dict[str, Any]:
     owner_address = attrs.get("CompleteOwnerAddress") or " ".join(
         part for part in [attrs.get("OWNADD"), attrs.get("OWNADD2")] if part
     )
@@ -1078,6 +1110,7 @@ def _normalize_arcgis_parcel(attrs: Dict[str, Any]) -> Dict[str, Any]:
         "exemptions": exemptions,
     }
 
+
 def _fmt_arcgis_number(value: Any) -> str:
     if value is None or value == "":
         return ""
@@ -1099,7 +1132,7 @@ def _fmt_arcgis_money(value: Any) -> str:
         return str(value)
 
 
-def _build_bernco_assessor_map_link(parcel: Dict[str, Any]) -> str:
+def _build_bernco_assessor_map_link(parcel: dict[str, Any]) -> str:
     """Build a BernCo Assessor Experience Builder link that selects the parcel by OBJECTID."""
     object_id = parcel.get("object_id") or parcel.get("oid")
     if not object_id or not BERNCO_EXPERIENCE_DATA_SOURCE_ID or not BERNCO_EXPERIENCE_APP_URL:
@@ -1112,7 +1145,7 @@ def _build_bernco_assessor_map_link(parcel: Dict[str, Any]) -> str:
     )
 
 
-def _build_google_maps_routing_links(parcel: Dict[str, Any]) -> Dict[str, str]:
+def _build_google_maps_routing_links(parcel: dict[str, Any]) -> dict[str, str]:
     """Build Google Maps search/directions URLs from the public GIS situs address."""
     situs = parcel.get("situs_address") or ""
     if not situs:
@@ -1121,18 +1154,13 @@ def _build_google_maps_routing_links(parcel: Dict[str, Any]) -> Dict[str, str]:
     destination = quote_plus(f"{situs}, Bernalillo County, NM")
     return {
         "google_maps_directions": (
-            "https://www.google.com/maps/dir/?api=1"
-            f"&destination={destination}"
-            "&travelmode=driving"
+            f"https://www.google.com/maps/dir/?api=1&destination={destination}&travelmode=driving"
         ),
-        "google_maps_search": (
-            "https://www.google.com/maps/search/?api=1"
-            f"&query={destination}"
-        ),
+        "google_maps_search": (f"https://www.google.com/maps/search/?api=1&query={destination}"),
     }
 
 
-def _format_arcgis_map_routing_text(result: Dict[str, Any]) -> str:
+def _format_arcgis_map_routing_text(result: dict[str, Any]) -> str:
     """Format BernCo Assessor map and Google Maps routing links for staff."""
     status = str(result.get("status") or "")
     answer = str(result.get("answer") or "").strip()
@@ -1172,7 +1200,7 @@ def _format_arcgis_map_routing_text(result: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
+def _format_arcgis_parcel_lookup_text(result: dict[str, Any]) -> str:
     status = str(result.get("status") or "")
     answer = str(result.get("answer") or "").strip()
     if status != "completed":
@@ -1236,7 +1264,9 @@ def _format_arcgis_parcel_lookup_text(result: Dict[str, Any]) -> str:
                 lines.append(f"      {label}: {_fmt_arcgis_money(value)}")
 
         if value_rows or exemption_rows:
-            lines.append("   Verification Note: Confirm value fields, exemption status/amounts, calculations, and taxability in iasWorld before relying on them.")
+            lines.append(
+                "   Verification Note: Confirm value fields, exemption status/amounts, calculations, and taxability in iasWorld before relying on them."
+            )
 
         lines.extend(
             [
@@ -1253,7 +1283,7 @@ async def _arcgis_public_parcel_lookup_result(
     search_text: str,
     max_results: int = ARCGIS_PUBLIC_PARCEL_MAX_RESULTS,
     return_geometry: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Query the public BernCo parcel FeatureServer layer with exact-first fallback."""
     search_text = str(search_text or "").strip()
     if len(search_text) < 3:
@@ -1283,7 +1313,7 @@ async def _arcgis_public_parcel_lookup_result(
         }
 
     timeout = httpx.Timeout(connect=10, read=25, write=20, pool=10)
-    last_error: Optional[Any] = None
+    last_error: Any | None = None
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         for query_mode, where_clause in candidates:
@@ -1299,7 +1329,9 @@ async def _arcgis_public_parcel_lookup_result(
                 params["outSR"] = "4326"
 
             try:
-                response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers())
+                response = await client.post(
+                    f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers()
+                )
                 data = await _read_json_or_text(response)
             except Exception as exc:
                 last_error = str(exc)
@@ -1320,7 +1352,11 @@ async def _arcgis_public_parcel_lookup_result(
             results = [_normalize_arcgis_parcel(feature.get("attributes", {}) or {}) for feature in features]
             count = len(results)
             exact_note = "" if count == 1 else " Broad or fallback search returned multiple possible matches."
-            transfer_note = " ArcGIS indicated there may be more matches than returned." if isinstance(data, dict) and data.get("exceededTransferLimit") else ""
+            transfer_note = (
+                " ArcGIS indicated there may be more matches than returned."
+                if isinstance(data, dict) and data.get("exceededTransferLimit")
+                else ""
+            )
             return {
                 "status": "completed",
                 "answer": (
@@ -1360,8 +1396,7 @@ async def _arcgis_public_parcel_lookup_result(
     }
 
 
-
-def _float_or_none(value: Any) -> Optional[float]:
+def _float_or_none(value: Any) -> float | None:
     try:
         if value is None or value == "":
             return None
@@ -1370,8 +1405,8 @@ def _float_or_none(value: Any) -> Optional[float]:
         return None
 
 
-def _arcgis_candidate_radius_values() -> List[float]:
-    values: List[float] = []
+def _arcgis_candidate_radius_values() -> list[float]:
+    values: list[float] = []
     for raw in re.split(r"[,;\s]+", ARCGIS_CANDIDATE_PEER_RADIUS_MILES or ""):
         try:
             miles = float(raw)
@@ -1386,7 +1421,7 @@ def _arcgis_sql_equals(field: str, value: Any) -> str:
     return f"{field} = '{_clean_arcgis_sql_text(str(value))}'"
 
 
-def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, str]]:
+def _arcgis_candidate_where_stages(subject: dict[str, Any]) -> list[tuple[str, str]]:
     """
     Build progressively broader, Cloudflare-safe where clauses for ArcGIS-only
     parcel peers. Do NOT include SQL exclusion logic such as UPC <> subject,
@@ -1402,17 +1437,17 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
     tax_district = subject.get("tax_district")
     style = subject.get("style")
 
-    base: List[str] = []
+    base: list[str] = []
     if tax_year:
         base.append(_arcgis_sql_equals("TAXYR", tax_year))
 
-    def build(extra: List[str]) -> str:
+    def build(extra: list[str]) -> str:
         clauses = base + [item for item in extra if item]
         return " AND ".join(clauses) if clauses else "1=1"
 
-    stages: List[Tuple[str, str]] = []
+    stages: list[tuple[str, str]] = []
 
-    tight: List[str] = []
+    tight: list[str] = []
     if roll_type:
         tight.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
     if prop_class:
@@ -1428,7 +1463,7 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
     if tight:
         stages.append(("same_class_use_style_taxdist", build(tight)))
 
-    strong: List[str] = []
+    strong: list[str] = []
     if roll_type:
         strong.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
     if prop_class:
@@ -1438,7 +1473,7 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
     if strong:
         stages.append(("same_roll_propclass_luc", build(strong)))
 
-    moderate: List[str] = []
+    moderate: list[str] = []
     if roll_type:
         moderate.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
     if prop_class:
@@ -1446,7 +1481,7 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
     if moderate:
         stages.append(("same_roll_propclass", build(moderate)))
 
-    broad: List[str] = []
+    broad: list[str] = []
     if roll_type:
         broad.append(_arcgis_sql_equals("ROLLTYPE", roll_type))
     if broad:
@@ -1455,17 +1490,18 @@ def _arcgis_candidate_where_stages(subject: Dict[str, Any]) -> List[Tuple[str, s
     stages.append(("nearby_public_parcels", build([])))
 
     seen = set()
-    unique: List[Tuple[str, str]] = []
+    unique: list[tuple[str, str]] = []
     for name, where in stages:
         if where not in seen:
             seen.add(where)
             unique.append((name, where))
     return unique
 
-def _arcgis_candidate_peer_score(subject: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
+
+def _arcgis_candidate_peer_score(subject: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     """Score public GIS candidate peers using only fields available in ArcGIS."""
     score = 0.0
-    reasons: List[str] = []
+    reasons: list[str] = []
 
     def same(field: str, label: str, points: float) -> None:
         nonlocal score
@@ -1516,7 +1552,7 @@ def _arcgis_candidate_peer_score(subject: Dict[str, Any], candidate: Dict[str, A
     sy = _float_or_none(subject_coords.get("y"))
     cx = _float_or_none(cand_coords.get("x"))
     cy = _float_or_none(cand_coords.get("y"))
-    distance_miles: Optional[float] = None
+    distance_miles: float | None = None
     if sx is not None and sy is not None and cx is not None and cy is not None:
         distance_miles = (((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5) / 5280.0
         if distance_miles <= 1:
@@ -1547,7 +1583,7 @@ def _arcgis_candidate_peer_score(subject: Dict[str, Any], candidate: Dict[str, A
 async def _arcgis_public_candidate_peers_result(
     search_text: str,
     max_results: int = 10,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Find ArcGIS-only candidate parcel peers around a subject.
 
@@ -1567,7 +1603,9 @@ async def _arcgis_public_candidate_peers_result(
     )
     if subject_lookup.get("status") != "completed" or int(subject_lookup.get("count") or 0) != 1:
         return {
-            "status": "needs_subject_selection" if subject_lookup.get("status") == "completed" else subject_lookup.get("status", "empty"),
+            "status": "needs_subject_selection"
+            if subject_lookup.get("status") == "completed"
+            else subject_lookup.get("status", "empty"),
             "answer": (
                 "ArcGIS candidate peer search needs exactly one subject parcel. "
                 f"Subject lookup status: {subject_lookup.get('status')}; count: {subject_lookup.get('count', 0)}."
@@ -1611,7 +1649,7 @@ async def _arcgis_public_candidate_peers_result(
     timeout = httpx.Timeout(connect=10, read=30, write=20, pool=10)
     stages = _arcgis_candidate_where_stages(subject)
     radii = _arcgis_candidate_radius_values()
-    last_error: Optional[Any] = None
+    last_error: Any | None = None
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         for radius_miles in radii:
@@ -1630,7 +1668,9 @@ async def _arcgis_public_candidate_peers_result(
                     "units": "esriSRUnit_Foot",
                 }
                 try:
-                    response = await client.post(f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers())
+                    response = await client.post(
+                        f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers()
+                    )
                     data = await _read_json_or_text(response)
                 except Exception as exc:
                     last_error = str(exc)
@@ -1644,7 +1684,7 @@ async def _arcgis_public_candidate_peers_result(
                     continue
 
                 features = data.get("features", []) if isinstance(data, dict) else []
-                peers: List[Dict[str, Any]] = []
+                peers: list[dict[str, Any]] = []
                 seen_keys = set()
                 subject_upc = str(subject.get("upc") or subject.get("txt_upc") or "").strip()
                 subject_oid = str(subject.get("object_id") or subject.get("oid") or "").strip()
@@ -1665,7 +1705,10 @@ async def _arcgis_public_candidate_peers_result(
                     peers.append(peer)
 
                 if peers:
-                    peers.sort(key=lambda item: (item.get("candidate_score") or 0, -1 * (item.get("distance_miles") or 999)), reverse=True)
+                    peers.sort(
+                        key=lambda item: (item.get("candidate_score") or 0, -1 * (item.get("distance_miles") or 999)),
+                        reverse=True,
+                    )
                     selected = peers[:max_results_int]
                     return {
                         "status": "completed",
@@ -1710,7 +1753,7 @@ async def _arcgis_public_candidate_peers_result(
     }
 
 
-def _format_arcgis_candidate_peers_text(result: Dict[str, Any]) -> str:
+def _format_arcgis_candidate_peers_text(result: dict[str, Any]) -> str:
     status = str(result.get("status") or "")
     answer = str(result.get("answer") or "").strip()
     lines = [
@@ -1757,15 +1800,26 @@ def _request_needs_arcgis_candidate_peers(prompt_text: str) -> bool:
     """True for comp/sold-sale requests where ArcGIS peer candidates can help triage."""
     text = (prompt_text or "").lower()
     terms = [
-        "comp", "comps", "comparable", "comparables", "candidate comps",
-        "similar properties", "nearby sales", "nearby sale", "recent sales",
-        "sold properties", "sold property", "sold homes", "sales nearby",
-        "market support", "market value support",
+        "comp",
+        "comps",
+        "comparable",
+        "comparables",
+        "candidate comps",
+        "similar properties",
+        "nearby sales",
+        "nearby sale",
+        "recent sales",
+        "sold properties",
+        "sold property",
+        "sold homes",
+        "sales nearby",
+        "market support",
+        "market value support",
     ]
     return _has_any_word_or_phrase(text, terms)
 
 
-def _format_arcgis_candidate_peers_for_homeharvest(result: Dict[str, Any]) -> str:
+def _format_arcgis_candidate_peers_for_homeharvest(result: dict[str, Any]) -> str:
     """Compact ArcGIS peer block for the Context Expert/HomeHarvest prompt."""
     lines = [
         "PUBLIC ARCGIS CANDIDATE PARCEL PEERS:",
@@ -1813,7 +1867,6 @@ def _format_arcgis_candidate_peers_for_homeharvest(result: Dict[str, Any]) -> st
     return "\n".join(lines).strip()
 
 
-
 def _extract_arcgis_search_text_from_prompt(prompt_text: str) -> str:
     """
     Pull the best address/UPC search value out of an A.C.E.S/HomeHarvest prompt.
@@ -1825,7 +1878,13 @@ def _extract_arcgis_search_text_from_prompt(prompt_text: str) -> str:
         block = _extract_label_block(
             text,
             label,
-            ["Staff request:", "Instructions:", "Uploaded record transcription:", "HOMEHARVEST ACTION RULE:", "COMP SEARCH QUALITY RULES:"],
+            [
+                "Staff request:",
+                "Instructions:",
+                "Uploaded record transcription:",
+                "HOMEHARVEST ACTION RULE:",
+                "COMP SEARCH QUALITY RULES:",
+            ],
         )
         if block:
             candidate = block.strip().splitlines()[0].strip(" -")
@@ -1854,7 +1913,7 @@ def _extract_arcgis_search_text_from_prompt(prompt_text: str) -> str:
     return ""
 
 
-def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: str) -> str:
+def _format_arcgis_context_for_homeharvest(result: dict[str, Any], search_text: str) -> str:
     """Create a compact prompt block that CustomGPT/HomeHarvest can use as subject context."""
     status = str(result.get("status") or "")
     lines = [
@@ -1906,7 +1965,9 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
                 ]
             )
         else:
-            lines.append("- Subject anchor: multiple public GIS candidates; ask/choose carefully and do not assume one is correct.")
+            lines.append(
+                "- Subject anchor: multiple public GIS candidates; ask/choose carefully and do not assume one is correct."
+            )
             for idx, item in enumerate(results[:5], start=1):
                 lines.append(
                     f"  {idx}. {item.get('situs_address') or 'Unknown situs'} | "
@@ -1944,6 +2005,7 @@ def _format_arcgis_context_for_homeharvest(result: Dict[str, Any], search_text: 
     )
     return "\n".join(lines).strip()
 
+
 async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
     """Prepend public ArcGIS parcel context to HomeHarvest/address/comps prompts."""
     text = str(prompt_text or "")
@@ -1954,10 +2016,15 @@ async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
 
     search_text = _extract_arcgis_search_text_from_prompt(text)
     if not search_text:
-        return text + "\n\nPUBLIC ARCGIS PARCEL CONTEXT:\n- ArcGIS pre-check was not run because no address or UPC could be extracted."
+        return (
+            text
+            + "\n\nPUBLIC ARCGIS PARCEL CONTEXT:\n- ArcGIS pre-check was not run because no address or UPC could be extracted."
+        )
 
     try:
-        gis_result = await _arcgis_public_parcel_lookup_result(search_text=search_text, max_results=5, return_geometry=False)
+        gis_result = await _arcgis_public_parcel_lookup_result(
+            search_text=search_text, max_results=5, return_geometry=False
+        )
         context_block = _format_arcgis_context_for_homeharvest(gis_result, search_text)
         peer_block = ""
         if _request_needs_arcgis_candidate_peers(text):
@@ -1982,7 +2049,7 @@ async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
 
 
 def _format_arcgis_context_for_report_generation(
-    result: Dict[str, Any],
+    result: dict[str, Any],
     search_text: str,
     include_homeharvest: bool = False,
 ) -> str:
@@ -2111,11 +2178,7 @@ async def _enrich_report_generation_prompt_with_arcgis(
             )
         return text
 
-    mode = (
-        "MODE: ADDRESS REPORT + HOMEHARVEST MARKET SUPPORT"
-        if include_homeharvest
-        else "MODE: REPORT GENERATION"
-    )
+    mode = "MODE: ADDRESS REPORT + HOMEHARVEST MARKET SUPPORT" if include_homeharvest else "MODE: REPORT GENERATION"
 
     search_text = _extract_arcgis_search_text_from_prompt(text)
     if not search_text:
@@ -2137,7 +2200,9 @@ async def _enrich_report_generation_prompt_with_arcgis(
         )
 
     try:
-        gis_result = await _arcgis_public_parcel_lookup_result(search_text=search_text, max_results=5, return_geometry=False)
+        gis_result = await _arcgis_public_parcel_lookup_result(
+            search_text=search_text, max_results=5, return_geometry=False
+        )
         context_block = _format_arcgis_context_for_report_generation(
             gis_result,
             search_text,
@@ -2218,7 +2283,7 @@ ENTRA_LOGIN_URL = "/.auth/login/aad?post_login_redirect_uri=/ui"
 ENTRA_LOGOUT_URL = "/.auth/logout?post_logout_redirect_uri=/ui"
 
 
-def _principal_name(headers: Dict[str, str]) -> str:
+def _principal_name(headers: dict[str, str]) -> str:
     """Sign-in name from the App Service headers (keys lowercased)."""
     name = (headers.get("x-ms-client-principal-name") or "").strip()
     if name:
@@ -2230,7 +2295,7 @@ def _principal_name(headers: Dict[str, str]) -> str:
         data = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
     except Exception:
         return ""
-    claims: Dict[str, str] = {}
+    claims: dict[str, str] = {}
     for claim in data.get("claims") or []:
         if isinstance(claim, dict):
             claims.setdefault(str(claim.get("typ", "")), str(claim.get("val", "")))
@@ -2248,7 +2313,7 @@ def _principal_name(headers: Dict[str, str]) -> str:
     return ""
 
 
-def _signed_in_user(headers: Dict[str, str]) -> Tuple[str, bool]:
+def _signed_in_user(headers: dict[str, str]) -> tuple[str, bool]:
     """(sign-in name, allowed). The name is empty when sign-in isn't active or nobody is signed in."""
     if not ENTRA_SIGNIN_ACTIVE:
         return "", False
@@ -2267,13 +2332,18 @@ def _not_on_list_page(user: str) -> Response:
         "<p>Ask the A.C.E.S. administrator to add you.</p>"
         f"<p><a href='{ENTRA_LOGOUT_URL}'>Sign out</a></p></body></html>"
     )
-    return Response(content=page, status_code=403, media_type="text/html; charset=utf-8",
-                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    return Response(
+        content=page,
+        status_code=403,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
-# Browser console for the MCP tools. The page itself holds no secrets. With county
-# sign-in on, the browser's sign-in session authorizes /mcp and /chat. Without it,
-# the page asks for the MCP access key and keeps it in that browser tab only.
+# Staff chat page (/ui). The page itself holds no secrets. With county sign-in on, the
+# browser's sign-in session authorizes /chat. Without it, the page asks for the MCP
+# access key (the local launcher passes it in the URL fragment) and keeps it in that
+# browser tab only.
 WEB_UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui.html")
 
 
@@ -2288,10 +2358,12 @@ async def web_ui_route(request):
             _log("UI blocked - signed-in user not on the access list", user=user)
             return _not_on_list_page(user)
     try:
-        with open(WEB_UI_FILE, "r", encoding="utf-8") as f:
+        with open(WEB_UI_FILE, encoding="utf-8") as f:
             html = f.read()
     except FileNotFoundError:
-        return JSONResponse({"error": "web_ui.html is missing. Put it in the same folder as server.py."}, status_code=404)
+        return JSONResponse(
+            {"error": "web_ui.html is missing. Put it in the same folder as server.py."}, status_code=404
+        )
 
     nonce = secrets.token_urlsafe(16)
     html = html.replace("__CSP_NONCE__", nonce)
@@ -2334,7 +2406,8 @@ async def health_check(request):
                 "/arcgis-parcel-map",
                 "/arcgis-candidate-peers",
                 "/context-expert-file/{token}",
-            ] + (["/data-tool"] if aces_sql_tools.REGISTERED else []),
+            ]
+            + (["/data-tool"] if aces_sql_tools.REGISTERED else []),
             "assessment_project_id": ASSESSMENT_PROJECT_ID,
             "smart_tasks_project_id": SMART_TASKS_PROJECT_ID,
             "smart_tasks_poll_seconds": SMART_TASKS_POLL_SECONDS,
@@ -2383,27 +2456,25 @@ async def health_check(request):
                 "ArcGIS_Public_Parcel_Map",
                 "ArcGIS_Public_Candidate_Peers",
                 "UPC_Router_Link",
-            ] + (aces_sql_tools.TOOL_NAMES if aces_sql_tools.REGISTERED else []),
+            ]
+            + (aces_sql_tools.TOOL_NAMES if aces_sql_tools.REGISTERED else []),
         }
     )
 
 
 @mcp.custom_route("/task-cache", methods=["GET"])
 async def task_cache_debug(request):
-    if not ACES_ADMIN_TOKEN:
-        return JSONResponse({"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403)
-    if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
+    """Admin-only view of the task cache: task IDs, prompt hashes and cached specialist answers."""
+    if (denied := _require_admin_debug_auth(request)) is not None:
+        return denied
     return JSONResponse({"count": len(TASK_CACHE), "tasks": TASK_CACHE})
 
 
 @mcp.custom_route("/task-cache/clear", methods=["POST"])
 async def task_cache_clear(request):
-    """Admin-only route to clear the local Render task cache."""
-    if not ACES_ADMIN_TOKEN:
-        return JSONResponse({"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403)
-    if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
+    """Admin-only route to clear the local task cache."""
+    if (denied := _require_admin_debug_auth(request)) is not None:
+        return denied
 
     count = len(TASK_CACHE)
     TASK_CACHE.clear()
@@ -2418,7 +2489,7 @@ async def context_expert_file_download_route(request):
     Public, unguessable download route for Context Expert generated artifacts.
 
     The token maps to CustomGPT project/task/message/file metadata stored in the
-    local Render cache. Staff see this safe Render link in Copilot/Teams; the
+    local file-link cache. Staff see a link to this server in Copilot/Teams; the
     CustomGPT API token stays server-side.
     """
     token = str(request.path_params.get("token") or "").strip()
@@ -2427,12 +2498,20 @@ async def context_expert_file_download_route(request):
 
     meta = FILE_LINK_CACHE.get(token)
     if not isinstance(meta, dict):
-        return JSONResponse({"status": "failed", "answer": "Download link not found or the server restarted."}, status_code=404)
+        return JSONResponse(
+            {"status": "failed", "answer": "Download link not found or the server restarted."}, status_code=404
+        )
 
     if time.time() > float(meta.get("expires_at", 0) or 0):
         FILE_LINK_CACHE.pop(token, None)
         _save_file_link_cache(FILE_LINK_CACHE)
-        return JSONResponse({"status": "failed", "answer": "Download link expired. Ask A.C.E.S. to regenerate or rerun the Context Expert task."}, status_code=410)
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": "Download link expired. Ask A.C.E.S. to regenerate or rerun the Context Expert task.",
+            },
+            status_code=410,
+        )
 
     project_id = str(meta.get("project_id") or "").strip()
     task_id = str(meta.get("task_id") or "").strip()
@@ -2446,24 +2525,34 @@ async def context_expert_file_download_route(request):
     if not CUSTOMGPT_API_TOKEN:
         return JSONResponse({"status": "failed", "answer": "Server is missing CUSTOMGPT_API_TOKEN."}, status_code=500)
 
-    url = (
-        f"{CUSTOMGPT_BASE}/projects/{project_id}"
-        f"/tasks/{task_id}/messages/{message_id}/files/{file_id}/download"
-    )
+    url = f"{CUSTOMGPT_BASE}/projects/{project_id}/tasks/{task_id}/messages/{message_id}/files/{file_id}/download"
     headers = {"Authorization": f"Bearer {CUSTOMGPT_API_TOKEN}", "Accept": "*/*"}
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=60, write=30, pool=15), follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=15, read=60, write=30, pool=15), follow_redirects=False
+        ) as client:
             response = await client.get(url, headers=headers)
     except Exception as exc:
-        _log("context expert file download failed", error=str(exc), project_id=project_id, task_id=task_id, file_id=file_id)
-        return JSONResponse({"status": "failed", "answer": f"Could not contact CustomGPT for the generated file: {exc}"}, status_code=502)
+        _log(
+            "context expert file download failed",
+            error=str(exc),
+            project_id=project_id,
+            task_id=task_id,
+            file_id=file_id,
+        )
+        return JSONResponse(
+            {"status": "failed", "answer": f"Could not contact CustomGPT for the generated file: {exc}"},
+            status_code=502,
+        )
 
     if response.status_code in {301, 302, 303, 307, 308}:
         location = response.headers.get("location")
         if location:
             return RedirectResponse(location)
-        return JSONResponse({"status": "failed", "answer": "CustomGPT returned a redirect without a location."}, status_code=502)
+        return JSONResponse(
+            {"status": "failed", "answer": "CustomGPT returned a redirect without a location."}, status_code=502
+        )
 
     if response.status_code == 200:
         content_type = response.headers.get("content-type") or "application/octet-stream"
@@ -2474,7 +2563,12 @@ async def context_expert_file_download_route(request):
         )
 
     body_preview = response.text[:1200] if response.text else ""
-    _log("context expert file download bad status", http_status=response.status_code, body_preview=body_preview, file_id=file_id)
+    _log(
+        "context expert file download bad status",
+        http_status=response.status_code,
+        body_preview=body_preview,
+        file_id=file_id,
+    )
     return JSONResponse(
         {
             "status": "failed",
@@ -2488,10 +2582,8 @@ async def context_expert_file_download_route(request):
 
 @mcp.custom_route("/check-task", methods=["GET"])
 async def check_task_route(request):
-    if not ACES_ADMIN_TOKEN:
-        return JSONResponse({"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403)
-    if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
+    if (denied := _require_admin_debug_auth(request)) is not None:
+        return denied
 
     project_id = str(request.query_params.get("project_id") or ASSESSMENT_PROJECT_ID).strip()
     task_id = str(request.query_params.get("task_id") or "").strip()
@@ -2522,7 +2614,7 @@ async def arcgis_parcel_lookup_route(request):
         return auth_response
 
     if request.method == "GET":
-        body: Dict[str, Any] = {}
+        body: dict[str, Any] = {}
     else:
         body = await _request_json_or_empty(request)
 
@@ -2544,13 +2636,17 @@ async def arcgis_parcel_lookup_route(request):
         or request.query_params.get("max_results")
         or ARCGIS_PUBLIC_PARCEL_MAX_RESULTS
     )
-    return_geometry_raw = str(
-        body.get("returnGeometry")
-        or body.get("return_geometry")
-        or request.query_params.get("returnGeometry")
-        or request.query_params.get("return_geometry")
-        or "false"
-    ).strip().lower()
+    return_geometry_raw = (
+        str(
+            body.get("returnGeometry")
+            or body.get("return_geometry")
+            or request.query_params.get("returnGeometry")
+            or request.query_params.get("return_geometry")
+            or "false"
+        )
+        .strip()
+        .lower()
+    )
     return_geometry = return_geometry_raw in {"1", "true", "yes", "on"}
 
     result = await _arcgis_public_parcel_lookup_result(
@@ -2559,7 +2655,6 @@ async def arcgis_parcel_lookup_route(request):
         return_geometry=return_geometry,
     )
     return JSONResponse(result)
-
 
 
 @mcp.custom_route("/arcgis-parcel-map", methods=["GET", "POST"])
@@ -2583,7 +2678,7 @@ async def arcgis_parcel_map_route(request):
         return auth_response
 
     if request.method == "GET":
-        body: Dict[str, Any] = {}
+        body: dict[str, Any] = {}
     else:
         body = await _request_json_or_empty(request)
 
@@ -2649,7 +2744,7 @@ async def arcgis_candidate_peers_route(request):
         return auth_response
 
     if request.method == "GET":
-        body: Dict[str, Any] = {}
+        body: dict[str, Any] = {}
     else:
         body = await _request_json_or_empty(request)
 
@@ -2679,7 +2774,6 @@ async def arcgis_candidate_peers_route(request):
     result["answer"] = _format_arcgis_candidate_peers_text(result)
     result["project_id"] = ASSESSMENT_PROJECT_ID
     return JSONResponse(result)
-
 
 
 @mcp.custom_route("/start-lookup", methods=["POST"])
@@ -2821,7 +2915,7 @@ async def check_pending_task_route(request):
         return auth_response
 
     if request.method == "GET":
-        body: Dict[str, Any] = {}
+        body: dict[str, Any] = {}
     else:
         body = await _request_json_or_empty(request)
 
@@ -2892,11 +2986,7 @@ async def smart_task_route(request):
 
     body = await _request_json_or_empty(request)
     prompt_text = str(body.get("promptText") or body.get("prompt_text") or "").strip()
-    project_id = str(
-        body.get("project_id")
-        or body.get("projectId")
-        or SMART_TASKS_PROJECT_ID
-    ).strip()
+    project_id = str(body.get("project_id") or body.get("projectId") or SMART_TASKS_PROJECT_ID).strip()
 
     if not prompt_text:
         return JSONResponse(
@@ -2980,7 +3070,9 @@ async def agent_call_route(request):
                     max_results=5 if is_map else ARCGIS_PUBLIC_PARCEL_MAX_RESULTS,
                     return_geometry=False,
                 )
-                answer = _format_arcgis_map_routing_text(result) if is_map else _format_arcgis_parcel_lookup_text(result)
+                answer = (
+                    _format_arcgis_map_routing_text(result) if is_map else _format_arcgis_parcel_lookup_text(result)
+                )
                 extra = {"results": result.get("results", [])}
         except Exception as exc:
             _log("agent_call_route arcgis exception", agent=agent, error=str(exc))
@@ -3064,9 +3156,7 @@ async def agent_call_route(request):
         )
 
 
-
-
-def _require_config(project_id: str, tool_name: str) -> Optional[str]:
+def _require_config(project_id: str, tool_name: str) -> str | None:
     if not CUSTOMGPT_API_TOKEN:
         return "Missing CUSTOMGPT_API_TOKEN on this server."
     if not project_id:
@@ -3241,8 +3331,18 @@ def _looks_like_arcgis_lookup(prompt_text: str) -> bool:
         return True
 
     lookup_words = [
-        "look up", "lookup", "ook up", "search", "find", "parcel",
-        "property", "situs", "address", "owner", "upc", "pin"
+        "look up",
+        "lookup",
+        "ook up",
+        "search",
+        "find",
+        "parcel",
+        "property",
+        "situs",
+        "address",
+        "owner",
+        "upc",
+        "pin",
     ]
     return any(word in text for word in lookup_words)
 
@@ -3263,6 +3363,7 @@ def _should_enable_homeharvest(prompt_text: str) -> bool:
     """
     return _request_needs_homeharvest(prompt_text)
 
+
 def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     """Add action-use guidance without overriding an existing MODE block."""
     text = prompt_text or ""
@@ -3272,39 +3373,39 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
     date_from, date_to = _past_years_date_range(10)
 
     action_rule = (
-    "\n\nHOMEHARVEST ACTION RULE:\n"
-    "- Use the enabled HomeHarvest custom action when the request is an address, nearby sale, or comp lookup.\n"
-    "- Do not answer from memory, previous runs, cached examples, or stale conversation context. Run the action for this request.\n"
-    "- Prefer operation homeharvestSearchProperties.\n"
-    "- Use POST /properties/search.\n"
-    "- For address/comps work, search the subject address itself first, then search sold/listing candidates around the subject.\n"
-    "- Return staff-readable numbered cards, not raw JSON.\n"
-    "- For report-generation requests, include the HomeHarvest/Public Aggregator Market Support section in the report text and any generated file.\n"
-    "- A no-result response is not a tool failure.\n"
-    "\n"
-    "GIS + HOMEHARVEST RULES:\n"
-    "- If a PUBLIC ARCGIS PARCEL CONTEXT block is present, use it as the subject identity/geography/assessment anchor.\n"
-    "- Also run/use HomeHarvest for the subject address when available; keep HomeHarvest subject fields separate and label them unofficial.\n"
-    "- If a PUBLIC ARCGIS CANDIDATE PARCEL PEERS block is present, use those addresses as peer leads for HomeHarvest sold-property enrichment.\n"
-    "- Return the GIS subject context first, HomeHarvest subject facts second if found, then HomeHarvest/public-aggregator candidate results.\n"
-    "- Do not treat GIS data as a verified sale, tax status, exemption approval/status, or certified record.\n"
-    "- Verify final parcel/account details in iasWorld before relying on them.\n"
-    "- Describe only what the returned data shows. Don't characterize market behavior, trends or neighborhoods beyond the returned rows.\n"
-    "- Don't offer to prepare or assist with a protest. You may explain the protest process if asked.\n"
-    "\n"
-    "COMP SEARCH QUALITY RULES:\n"
-    "- For comp requests, use listing_type=sold or sold status when supported.\n"
-    f"- For 'past 10 years', use date_from={date_from} and date_to={date_to} unless the user gives a different date range.\n"
-    "- Exclude land, lots, mobile homes, manufactured homes, rentals, active listings, pending listings, and rows with missing price, missing date, missing sqft, or missing residential characteristics.\n"
-    "- Do not return exactly 10 unless 10 usable residential candidates are found.\n"
-    "- If fewer than 10 usable residential candidates are found, return only the usable candidates and clearly say how many were found.\n"
-    "- Do not pad the list with land, missing-data rows, atypical low-price rows, or poor matches.\n"
-    "- Prefer similar residential properties by property type, living area, beds, baths, lot size, year built, and proximity; when ArcGIS lacks living area, use ArcGIS only for peer triage and require HomeHarvest/CAMA/MLS enrichment.\n"
-    "- Sort by comp similarity first, not newest first.\n"
-    "- Label results as unofficial public-aggregator candidate comps, not verified sales.\n"
-    "- If the source only returns list/public aggregator prices, say they are not verified sold prices.\n"
-    "- Do not mention an interactive map, file manager, generated file, download, attachment, report, or exported view unless the current tool response includes an actual generated_files item or downloadable link.\n"
-)
+        "\n\nHOMEHARVEST ACTION RULE:\n"
+        "- Use the enabled HomeHarvest custom action when the request is an address, nearby sale, or comp lookup.\n"
+        "- Do not answer from memory, previous runs, cached examples, or stale conversation context. Run the action for this request.\n"
+        "- Prefer operation homeharvestSearchProperties.\n"
+        "- Use POST /properties/search.\n"
+        "- For address/comps work, search the subject address itself first, then search sold/listing candidates around the subject.\n"
+        "- Return staff-readable numbered cards, not raw JSON.\n"
+        "- For report-generation requests, include the HomeHarvest/Public Aggregator Market Support section in the report text and any generated file.\n"
+        "- A no-result response is not a tool failure.\n"
+        "\n"
+        "GIS + HOMEHARVEST RULES:\n"
+        "- If a PUBLIC ARCGIS PARCEL CONTEXT block is present, use it as the subject identity/geography/assessment anchor.\n"
+        "- Also run/use HomeHarvest for the subject address when available; keep HomeHarvest subject fields separate and label them unofficial.\n"
+        "- If a PUBLIC ARCGIS CANDIDATE PARCEL PEERS block is present, use those addresses as peer leads for HomeHarvest sold-property enrichment.\n"
+        "- Return the GIS subject context first, HomeHarvest subject facts second if found, then HomeHarvest/public-aggregator candidate results.\n"
+        "- Do not treat GIS data as a verified sale, tax status, exemption approval/status, or certified record.\n"
+        "- Verify final parcel/account details in iasWorld before relying on them.\n"
+        "- Describe only what the returned data shows. Don't characterize market behavior, trends or neighborhoods beyond the returned rows.\n"
+        "- Don't offer to prepare or assist with a protest. You may explain the protest process if asked.\n"
+        "\n"
+        "COMP SEARCH QUALITY RULES:\n"
+        "- For comp requests, use listing_type=sold or sold status when supported.\n"
+        f"- For 'past 10 years', use date_from={date_from} and date_to={date_to} unless the user gives a different date range.\n"
+        "- Exclude land, lots, mobile homes, manufactured homes, rentals, active listings, pending listings, and rows with missing price, missing date, missing sqft, or missing residential characteristics.\n"
+        "- Do not return exactly 10 unless 10 usable residential candidates are found.\n"
+        "- If fewer than 10 usable residential candidates are found, return only the usable candidates and clearly say how many were found.\n"
+        "- Do not pad the list with land, missing-data rows, atypical low-price rows, or poor matches.\n"
+        "- Prefer similar residential properties by property type, living area, beds, baths, lot size, year built, and proximity; when ArcGIS lacks living area, use ArcGIS only for peer triage and require HomeHarvest/CAMA/MLS enrichment.\n"
+        "- Sort by comp similarity first, not newest first.\n"
+        "- Label results as unofficial public-aggregator candidate comps, not verified sales.\n"
+        "- If the source only returns list/public aggregator prices, say they are not verified sold prices.\n"
+        "- Do not mention an interactive map, file manager, generated file, download, attachment, report, or exported view unless the current tool response includes an actual generated_files item or downloadable link.\n"
+    )
 
     if "mode:" in text.lower():
         return text + action_rule
@@ -3315,10 +3416,16 @@ def _enrich_homeharvest_prompt(prompt_text: str) -> str:
 def _detect_assessment_status_message(prompt_text: str) -> str:
     text = (prompt_text or "").lower()
     if "mode: address / homeharvest lookup" in text:
-        return "Address/HomeHarvest task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
+        return (
+            "Address/HomeHarvest task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
+        )
     if "mode: record + homeharvest comp support" in text:
         return "Record/HomeHarvest comp-support task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
-    if "mode: address report generation" in text or "mode: report generation" in text or _request_needs_report_generation(prompt_text):
+    if (
+        "mode: address report generation" in text
+        or "mode: report generation" in text
+        or _request_needs_report_generation(prompt_text)
+    ):
         return "Report/file generation task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
     return "Task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
 
@@ -3336,7 +3443,7 @@ def _extract_answer_from_message(final_data: Any) -> str:
     if not isinstance(final_data, dict):
         return ""
 
-    candidates: List[Any] = []
+    candidates: list[Any] = []
     data = final_data.get("data")
     if isinstance(data, dict):
         candidates.append(data)
@@ -3362,8 +3469,8 @@ def _extract_answer_from_message(final_data: Any) -> str:
     return ""
 
 
-def _extract_progress_log_from_task_data(data: Dict[str, Any]) -> List[str]:
-    progress_log: List[str] = []
+def _extract_progress_log_from_task_data(data: dict[str, Any]) -> list[str]:
+    progress_log: list[str] = []
     events = data.get("events", []) or []
     for ev in events:
         ev = ev or {}
@@ -3382,12 +3489,14 @@ def _format_still_running_response(
     task_id: str,
     cache_key: str,
     latest_status: str,
-    progress_log: List[str],
+    progress_log: list[str],
 ) -> str:
     if tool_name == "Assessment_Context_Expert":
         first_line = _detect_assessment_status_message(prompt_text)
     else:
-        first_line = f"{tool_name} task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
+        first_line = (
+            f"{tool_name} task is still running. Use Check_CustomGPT_Task with the Task ID and Project ID below."
+        )
 
     return (
         f"{first_line}\n"
@@ -3405,7 +3514,7 @@ async def _fetch_customgpt_final_message(
     project_id: str,
     task_id: str,
     message_id: str,
-    headers: Dict[str, str],
+    headers: dict[str, str],
 ) -> str:
     base = f"{CUSTOMGPT_BASE}/projects/{project_id}/tasks/{task_id}"
     final = await client.get(f"{base}/messages/{message_id}", headers=headers)
@@ -3447,9 +3556,9 @@ def _markdown_link_label(value: str) -> str:
     return label or "generated file"
 
 
-def _extract_file_list_from_payload(payload: Any) -> List[Dict[str, Any]]:
+def _extract_file_list_from_payload(payload: Any) -> list[dict[str, Any]]:
     """Find file objects in the common CustomGPT files response envelopes."""
-    found: List[Dict[str, Any]] = []
+    found: list[dict[str, Any]] = []
 
     def visit(value: Any, depth: int = 0) -> None:
         if depth > 5:
@@ -3461,7 +3570,11 @@ def _extract_file_list_from_payload(payload: Any) -> List[Dict[str, Any]]:
                     has_file_shape = bool(
                         item.get("id") or item.get("file_id") or item.get("uuid") or item.get("artifact_id")
                     ) and bool(
-                        item.get("name") or item.get("file_name") or item.get("filename") or item.get("title") or item.get("type")
+                        item.get("name")
+                        or item.get("file_name")
+                        or item.get("filename")
+                        or item.get("title")
+                        or item.get("type")
                     )
                     if has_file_shape:
                         found.append(item)
@@ -3476,7 +3589,7 @@ def _extract_file_list_from_payload(payload: Any) -> List[Dict[str, Any]]:
     visit(payload)
 
     # De-dupe by best available id.
-    deduped: List[Dict[str, Any]] = []
+    deduped: list[dict[str, Any]] = []
     seen = set()
     for item in found:
         file_id = _extract_customgpt_file_id(item)
@@ -3488,7 +3601,7 @@ def _extract_file_list_from_payload(payload: Any) -> List[Dict[str, Any]]:
     return deduped
 
 
-def _extract_customgpt_file_id(file_obj: Dict[str, Any]) -> str:
+def _extract_customgpt_file_id(file_obj: dict[str, Any]) -> str:
     for key in ("id", "file_id", "fileId", "uuid", "artifact_id", "artifactId"):
         value = file_obj.get(key)
         if value is not None and str(value).strip():
@@ -3496,7 +3609,7 @@ def _extract_customgpt_file_id(file_obj: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_customgpt_file_name(file_obj: Dict[str, Any]) -> str:
+def _extract_customgpt_file_name(file_obj: dict[str, Any]) -> str:
     for key in ("name", "file_name", "fileName", "filename", "original_name", "title"):
         value = file_obj.get(key)
         if value is not None and str(value).strip():
@@ -3505,10 +3618,9 @@ def _extract_customgpt_file_name(file_obj: Dict[str, Any]) -> str:
     return f"context_expert_artifact_{file_id}" if file_id else "context_expert_artifact"
 
 
-def _is_generated_customgpt_artifact(file_obj: Dict[str, Any]) -> bool:
+def _is_generated_customgpt_artifact(file_obj: dict[str, Any]) -> bool:
     text_fields = " ".join(
-        str(file_obj.get(key) or "").lower()
-        for key in ("type", "kind", "category", "source", "storage_type", "origin")
+        str(file_obj.get(key) or "").lower() for key in ("type", "kind", "category", "source", "storage_type", "origin")
     )
     if any(word in text_fields for word in ("artifact", "generated", "output")):
         return True
@@ -3524,9 +3636,9 @@ async def _create_context_expert_artifact_links(
     project_id: str,
     task_id: str,
     message_id: str,
-    headers: Dict[str, str],
-) -> List[str]:
-    """List CustomGPT generated artifacts and create staff-safe Render download links."""
+    headers: dict[str, str],
+) -> list[str]:
+    """List CustomGPT generated artifacts and create staff-safe download links through this server."""
     if not CONTEXT_EXPERT_FILE_LINKS_ENABLED:
         return []
     if not PUBLIC_BASE_URL:
@@ -3540,7 +3652,13 @@ async def _create_context_expert_artifact_links(
         response = await client.get(url, headers=headers)
         payload = await _read_json_or_text(response)
     except Exception as exc:
-        _log("context expert files list failed", project_id=project_id, task_id=task_id, message_id=message_id, error=str(exc))
+        _log(
+            "context expert files list failed",
+            project_id=project_id,
+            task_id=task_id,
+            message_id=message_id,
+            error=str(exc),
+        )
         return []
 
     if response.status_code >= 400:
@@ -3555,7 +3673,7 @@ async def _create_context_expert_artifact_links(
         return []
 
     file_objects = _extract_file_list_from_payload(payload)
-    links: List[str] = []
+    links: list[str] = []
     now = time.time()
 
     for file_obj in file_objects:
@@ -3583,7 +3701,13 @@ async def _create_context_expert_artifact_links(
 
     if links:
         _save_file_link_cache(FILE_LINK_CACHE)
-        _log("context expert artifact links created", project_id=project_id, task_id=task_id, message_id=message_id, count=len(links))
+        _log(
+            "context expert artifact links created",
+            project_id=project_id,
+            task_id=task_id,
+            message_id=message_id,
+            count=len(links),
+        )
 
     return links
 
@@ -3593,8 +3717,8 @@ async def _append_context_expert_artifact_links(
     answer: str,
     project_id: str,
     task_id: str,
-    message_id: Optional[str],
-    headers: Dict[str, str],
+    message_id: str | None,
+    headers: dict[str, str],
 ) -> str:
     """Append markdown download links for generated artifacts, when present."""
     text = str(answer or "").strip()
@@ -3620,7 +3744,7 @@ async def _fetch_task_history_fallback(
     client: httpx.AsyncClient,
     project_id: str,
     task_id: str,
-    headers: Dict[str, str],
+    headers: dict[str, str],
 ) -> str:
     """
     Fallback for cases where the task poll result was consumed/expired. CustomGPT
@@ -3633,7 +3757,7 @@ async def _fetch_task_history_fallback(
         return ""
 
     # Try common list shapes and return the last answer-like message.
-    possible_lists: List[Any] = []
+    possible_lists: list[Any] = []
     if isinstance(data, dict):
         for key in ("data", "messages", "items", "results"):
             value = data.get(key)
@@ -3680,11 +3804,15 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
         if poll.status_code >= 400:
             history_answer = await _fetch_task_history_fallback(client, project_id, task_id, headers)
             if history_answer:
-                _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status="history_fallback", answer=history_answer)
+                _update_task_cache_by_task_id(
+                    project_id, task_id, "answered", latest_status="history_fallback", answer=history_answer
+                )
                 return history_answer
 
             error_text = _safe_json_dumps(poll_data)
-            _update_task_cache_by_task_id(project_id, task_id, "check_failed", latest_status="check_failed", error=error_text)
+            _update_task_cache_by_task_id(
+                project_id, task_id, "check_failed", latest_status="check_failed", error=error_text
+            )
             return (
                 "Task check failed.\n"
                 f"Project ID: {project_id}\n"
@@ -3701,7 +3829,9 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
 
         if latest_status != "completed":
             # Record this check's progress first, so "no new progress" is measured correctly.
-            _update_task_cache_by_task_id(project_id, task_id, "still_running", latest_status=latest_status, progress_log=progress_log)
+            _update_task_cache_by_task_id(
+                project_id, task_id, "still_running", latest_status=latest_status, progress_log=progress_log
+            )
             stall_reason = _task_stall_reason(project_id, task_id)
             if stall_reason:
                 # Marked "stalled" so identical requests start a fresh task instead of reusing this one.
@@ -3724,17 +3854,36 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
 
         inline_answer = _extract_answer_from_message({"data": data}) or _extract_answer_from_message(data)
         if inline_answer:
-            inline_answer = await _append_context_expert_artifact_links(client, inline_answer, project_id, task_id, str(message_id) if message_id else None, headers)
-            _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status=latest_status, message_id=str(message_id) if message_id else None, progress_log=progress_log, answer=inline_answer)
+            inline_answer = await _append_context_expert_artifact_links(
+                client, inline_answer, project_id, task_id, str(message_id) if message_id else None, headers
+            )
+            _update_task_cache_by_task_id(
+                project_id,
+                task_id,
+                "answered",
+                latest_status=latest_status,
+                message_id=str(message_id) if message_id else None,
+                progress_log=progress_log,
+                answer=inline_answer,
+            )
             return inline_answer
 
         if not message_id:
             history_answer = await _fetch_task_history_fallback(client, project_id, task_id, headers)
             if history_answer:
-                _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status="history_fallback", progress_log=progress_log, answer=history_answer)
+                _update_task_cache_by_task_id(
+                    project_id,
+                    task_id,
+                    "answered",
+                    latest_status="history_fallback",
+                    progress_log=progress_log,
+                    answer=history_answer,
+                )
                 return history_answer
 
-            _update_task_cache_by_task_id(project_id, task_id, "completed_no_message_id", latest_status=latest_status, progress_log=progress_log)
+            _update_task_cache_by_task_id(
+                project_id, task_id, "completed_no_message_id", latest_status=latest_status, progress_log=progress_log
+            )
             return (
                 "Task completed but no message_id was returned.\n"
                 f"Project ID: {project_id}\n"
@@ -3743,25 +3892,54 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
             )
 
         answer = await _fetch_customgpt_final_message(client, project_id, task_id, str(message_id), headers)
-        if answer.startswith("Final message fetch failed") or answer.startswith("Task completed but the final answer was empty"):
+        if answer.startswith("Final message fetch failed") or answer.startswith(
+            "Task completed but the final answer was empty"
+        ):
             history_answer = await _fetch_task_history_fallback(client, project_id, task_id, headers)
             if history_answer:
-                history_answer = await _append_context_expert_artifact_links(client, history_answer, project_id, task_id, str(message_id), headers)
-                _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status="history_fallback", message_id=str(message_id), progress_log=progress_log, answer=history_answer)
+                history_answer = await _append_context_expert_artifact_links(
+                    client, history_answer, project_id, task_id, str(message_id), headers
+                )
+                _update_task_cache_by_task_id(
+                    project_id,
+                    task_id,
+                    "answered",
+                    latest_status="history_fallback",
+                    message_id=str(message_id),
+                    progress_log=progress_log,
+                    answer=history_answer,
+                )
                 return history_answer
 
-            _update_task_cache_by_task_id(project_id, task_id, "final_fetch_or_empty_failed", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, error=answer)
+            _update_task_cache_by_task_id(
+                project_id,
+                task_id,
+                "final_fetch_or_empty_failed",
+                latest_status=latest_status,
+                message_id=str(message_id),
+                progress_log=progress_log,
+                error=answer,
+            )
             return answer
 
-        answer = await _append_context_expert_artifact_links(client, answer, project_id, task_id, str(message_id), headers)
-        _update_task_cache_by_task_id(project_id, task_id, "answered", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, answer=answer)
+        answer = await _append_context_expert_artifact_links(
+            client, answer, project_id, task_id, str(message_id), headers
+        )
+        _update_task_cache_by_task_id(
+            project_id,
+            task_id,
+            "answered",
+            latest_status=latest_status,
+            message_id=str(message_id),
+            progress_log=progress_log,
+            answer=answer,
+        )
         return answer
-
 
 
 def _extract_session_id_from_conversation_response(data: Any) -> str:
     """Extract a CustomGPT conversation/session id from common response envelopes."""
-    candidates: List[Any] = []
+    candidates: list[Any] = []
     if isinstance(data, dict):
         candidates.append(data)
         nested = data.get("data")
@@ -3783,7 +3961,7 @@ async def _call_customgpt_conversation(
     prompt_text: str,
     tool_name: str,
     response_source: str = "openai_content",
-    agent_capability: Optional[str] = None,
+    agent_capability: str | None = None,
 ) -> str:
     """
     Use the normal CustomGPT conversation API for non-Plan & Act agents.
@@ -3838,7 +4016,7 @@ async def _call_customgpt_conversation(
                 f"Response: {_safe_json_dumps(create_data)}"
             )
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "prompt": prompt_text,
             "response_source": response_source,
         }
@@ -3881,22 +4059,21 @@ async def _call_customgpt_conversation(
         return answer
 
 
-def _is_homeharvest_lookup(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
+def _is_homeharvest_lookup(tool_name: str, prompt_text: str, action_id: str | None) -> bool:
     return tool_name == "Assessment_Context_Expert" and bool(action_id or _should_enable_homeharvest(prompt_text))
 
 
-def _is_fresh_assessment_task(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
+def _is_fresh_assessment_task(tool_name: str, prompt_text: str, action_id: str | None) -> bool:
     """Run-specific tasks should not reuse completed cached answers."""
     if tool_name == "Smart_Tasks":
         return True
 
     return tool_name == "Assessment_Context_Expert" and (
-        _is_homeharvest_lookup(tool_name, prompt_text, action_id)
-        or _request_needs_report_generation(prompt_text)
+        _is_homeharvest_lookup(tool_name, prompt_text, action_id) or _request_needs_report_generation(prompt_text)
     )
 
 
-def _should_reuse_prompt_cache(tool_name: str, prompt_text: str, action_id: Optional[str]) -> bool:
+def _should_reuse_prompt_cache(tool_name: str, prompt_text: str, action_id: str | None) -> bool:
     """
     Decide whether a direct specialist tool call may reuse a prompt-level cached task.
 
@@ -3918,7 +4095,7 @@ def _should_reuse_prompt_cache(tool_name: str, prompt_text: str, action_id: Opti
     return False
 
 
-def _should_reuse_existing_homeharvest_task(existing_task: Dict[str, Any]) -> bool:
+def _should_reuse_existing_homeharvest_task(existing_task: dict[str, Any]) -> bool:
     """Allow reuse only for still-running HomeHarvest tasks, not completed answers."""
     if not REUSE_RUNNING_HOMEHARVEST_TASKS:
         return False
@@ -3935,9 +4112,9 @@ async def _call_customgpt_task(
     project_id: str,
     prompt_text: str,
     tool_name: str,
-    action_id: Optional[str] = None,
+    action_id: str | None = None,
     poll_seconds: int = DEFAULT_POLL_SECONDS,
-    agent_capability: Optional[str] = None,
+    agent_capability: str | None = None,
     response_source: str = "openai_content",
 ) -> str:
     config_error = _require_config(project_id, tool_name)
@@ -3981,26 +4158,40 @@ async def _call_customgpt_task(
     # Duplicate-proofing: non-HomeHarvest tools can reuse cached answers.
     # HomeHarvest/address/comps lookups default to fresh submissions so repeated
     # Copilot tests actually reach CustomGPT/Context Expert instead of returning
-    # an old last_answer from the Render cache.
+    # an old last_answer from the task cache.
     existing_task = _find_existing_prompt_task(project_id, tool_name, prompt_text)
     if existing_task and should_reuse_prompt_cache:
         existing_answer = str(existing_task.get("last_answer") or "").strip()
         if existing_answer:
-            _log("CACHE HIT - returning cached answer without CustomGPT submit", tool=tool_name, project=project_id, task_id=existing_task.get("task_id"))
+            _log(
+                "CACHE HIT - returning cached answer without CustomGPT submit",
+                tool=tool_name,
+                project=project_id,
+                task_id=existing_task.get("task_id"),
+            )
             return existing_answer
         existing_task_id = str(existing_task.get("task_id") or "").strip()
         if existing_task_id:
             _log("CACHE HIT - rechecking existing task", tool=tool_name, project=project_id, task_id=existing_task_id)
             return await _check_customgpt_task_result(project_id=project_id, task_id=existing_task_id)
 
-    if existing_task and _is_fresh_assessment_task(tool_name, prompt_text, action_id) and _should_reuse_existing_homeharvest_task(existing_task):
+    if (
+        existing_task
+        and _is_fresh_assessment_task(tool_name, prompt_text, action_id)
+        and _should_reuse_existing_homeharvest_task(existing_task)
+    ):
         existing_task_id = str(existing_task.get("task_id") or "").strip()
         if existing_task_id:
             _log("REUSING IN-FLIGHT ASSESSMENT TASK", tool=tool_name, project=project_id, task_id=existing_task_id)
             return await _check_customgpt_task_result(project_id=project_id, task_id=existing_task_id)
 
     if existing_task and not should_reuse_prompt_cache:
-        _log("BYPASSING PROMPT CACHE - fresh HomeHarvest/Assessment lookup", tool=tool_name, project=project_id, previous_task_id=existing_task.get("task_id"))
+        _log(
+            "BYPASSING PROMPT CACHE - fresh HomeHarvest/Assessment lookup",
+            tool=tool_name,
+            project=project_id,
+            previous_task_id=existing_task.get("task_id"),
+        )
 
     headers = {"Authorization": f"Bearer {CUSTOMGPT_API_TOKEN}", "Accept": "application/json"}
 
@@ -4014,7 +4205,7 @@ async def _call_customgpt_task(
     capability = (agent_capability or "optimal-choice").strip()
     selected_response_source = (response_source or "openai_content").strip()
 
-    multipart: Dict[str, Any] = {
+    multipart: dict[str, Any] = {
         "name": (None, task_name),
         "prompt": (None, prompt_text),
         "response_source": (None, selected_response_source),
@@ -4053,8 +4244,8 @@ async def _call_customgpt_task(
 
         message_id = None
         latest_status = "submitted"
-        progress_log: List[str] = []
-        completed_data: Dict[str, Any] = {}
+        progress_log: list[str] = []
+        completed_data: dict[str, Any] = {}
 
         while loop.time() < deadline:
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -4063,7 +4254,16 @@ async def _call_customgpt_task(
 
             if poll.status_code >= 400:
                 error_text = _safe_json_dumps(poll_data)
-                _remember_task(project_id, tool_name, prompt_text, task_id, "poll_failed", latest_status=latest_status, progress_log=progress_log, error=error_text)
+                _remember_task(
+                    project_id,
+                    tool_name,
+                    prompt_text,
+                    task_id,
+                    "poll_failed",
+                    latest_status=latest_status,
+                    progress_log=progress_log,
+                    error=error_text,
+                )
                 return (
                     f"{tool_name} task poll failed.\n"
                     f"Task ID: {task_id}\n"
@@ -4087,7 +4287,16 @@ async def _call_customgpt_task(
                 ev_data = ev.get("data", {}) or {}
                 if ev.get("type") == "error":
                     error_message = str(ev_data.get("message", "Unknown error"))
-                    _remember_task(project_id, tool_name, prompt_text, task_id, "task_failed", latest_status=latest_status, progress_log=progress_log, error=error_message)
+                    _remember_task(
+                        project_id,
+                        tool_name,
+                        prompt_text,
+                        task_id,
+                        "task_failed",
+                        latest_status=latest_status,
+                        progress_log=progress_log,
+                        error=error_message,
+                    )
                     return (
                         f"{tool_name} task failed.\n"
                         f"Task ID: {task_id}\n"
@@ -4096,7 +4305,15 @@ async def _call_customgpt_task(
                         f"Error: {error_message}"
                     )
 
-            _remember_task(project_id, tool_name, prompt_text, task_id, "polling", latest_status=latest_status, progress_log=progress_log)
+            _remember_task(
+                project_id,
+                tool_name,
+                prompt_text,
+                task_id,
+                "polling",
+                latest_status=latest_status,
+                progress_log=progress_log,
+            )
 
             if latest_status == "completed":
                 completed_data = data
@@ -4116,22 +4333,64 @@ async def _call_customgpt_task(
                 break
 
         if latest_status != "completed":
-            _remember_task(project_id, tool_name, prompt_text, task_id, "still_running", latest_status=latest_status, progress_log=progress_log)
-            return _format_still_running_response(project_id, tool_name, prompt_text, task_id, cache_key, latest_status, progress_log)
+            _remember_task(
+                project_id,
+                tool_name,
+                prompt_text,
+                task_id,
+                "still_running",
+                latest_status=latest_status,
+                progress_log=progress_log,
+            )
+            return _format_still_running_response(
+                project_id, tool_name, prompt_text, task_id, cache_key, latest_status, progress_log
+            )
 
-        inline_answer = _extract_answer_from_message({"data": completed_data}) or _extract_answer_from_message(completed_data)
+        inline_answer = _extract_answer_from_message({"data": completed_data}) or _extract_answer_from_message(
+            completed_data
+        )
         if inline_answer:
-            inline_answer = await _append_context_expert_artifact_links(client, inline_answer, project_id, task_id, str(message_id) if message_id else None, headers)
-            _remember_task(project_id, tool_name, prompt_text, task_id, "answered", latest_status=latest_status, message_id=str(message_id) if message_id else None, progress_log=progress_log, answer=inline_answer)
+            inline_answer = await _append_context_expert_artifact_links(
+                client, inline_answer, project_id, task_id, str(message_id) if message_id else None, headers
+            )
+            _remember_task(
+                project_id,
+                tool_name,
+                prompt_text,
+                task_id,
+                "answered",
+                latest_status=latest_status,
+                message_id=str(message_id) if message_id else None,
+                progress_log=progress_log,
+                answer=inline_answer,
+            )
             return inline_answer
 
         if not message_id:
             history_answer = await _fetch_task_history_fallback(client, project_id, task_id, headers)
             if history_answer:
-                _remember_task(project_id, tool_name, prompt_text, task_id, "answered", latest_status="history_fallback", progress_log=progress_log, answer=history_answer)
+                _remember_task(
+                    project_id,
+                    tool_name,
+                    prompt_text,
+                    task_id,
+                    "answered",
+                    latest_status="history_fallback",
+                    progress_log=progress_log,
+                    answer=history_answer,
+                )
                 return history_answer
 
-            _remember_task(project_id, tool_name, prompt_text, task_id, "completed_no_message_id", latest_status=latest_status, progress_log=progress_log, error=_safe_json_dumps(completed_data))
+            _remember_task(
+                project_id,
+                tool_name,
+                prompt_text,
+                task_id,
+                "completed_no_message_id",
+                latest_status=latest_status,
+                progress_log=progress_log,
+                error=_safe_json_dumps(completed_data),
+            )
             return (
                 f"{tool_name} task completed but no message_id was returned.\n"
                 f"Task ID: {task_id}\n"
@@ -4141,18 +4400,54 @@ async def _call_customgpt_task(
             )
 
         answer = await _fetch_customgpt_final_message(client, project_id, task_id, str(message_id), headers)
-        if answer.startswith("Final message fetch failed") or answer.startswith("Task completed but the final answer was empty"):
+        if answer.startswith("Final message fetch failed") or answer.startswith(
+            "Task completed but the final answer was empty"
+        ):
             history_answer = await _fetch_task_history_fallback(client, project_id, task_id, headers)
             if history_answer:
-                history_answer = await _append_context_expert_artifact_links(client, history_answer, project_id, task_id, str(message_id), headers)
-                _remember_task(project_id, tool_name, prompt_text, task_id, "answered", latest_status="history_fallback", message_id=str(message_id), progress_log=progress_log, answer=history_answer)
+                history_answer = await _append_context_expert_artifact_links(
+                    client, history_answer, project_id, task_id, str(message_id), headers
+                )
+                _remember_task(
+                    project_id,
+                    tool_name,
+                    prompt_text,
+                    task_id,
+                    "answered",
+                    latest_status="history_fallback",
+                    message_id=str(message_id),
+                    progress_log=progress_log,
+                    answer=history_answer,
+                )
                 return history_answer
 
-            _remember_task(project_id, tool_name, prompt_text, task_id, "final_fetch_or_empty_failed", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, error=answer)
+            _remember_task(
+                project_id,
+                tool_name,
+                prompt_text,
+                task_id,
+                "final_fetch_or_empty_failed",
+                latest_status=latest_status,
+                message_id=str(message_id),
+                progress_log=progress_log,
+                error=answer,
+            )
             return f"{tool_name} final retrieval failed.\nTask ID: {task_id}\nProject ID: {project_id}\nCache key: {cache_key}\n{answer}"
 
-        answer = await _append_context_expert_artifact_links(client, answer, project_id, task_id, str(message_id), headers)
-        _remember_task(project_id, tool_name, prompt_text, task_id, "answered", latest_status=latest_status, message_id=str(message_id), progress_log=progress_log, answer=answer)
+        answer = await _append_context_expert_artifact_links(
+            client, answer, project_id, task_id, str(message_id), headers
+        )
+        _remember_task(
+            project_id,
+            tool_name,
+            prompt_text,
+            task_id,
+            "answered",
+            latest_status=latest_status,
+            message_id=str(message_id),
+            progress_log=progress_log,
+            answer=answer,
+        )
         return answer
 
 
@@ -4183,13 +4478,15 @@ async def Community_Educator(promptText: str) -> str:
     Takes exactly one parameter: promptText.
     """
     _log("Community_Educator invoked", poll_seconds=DEFAULT_POLL_SECONDS)
-    return _specialist_result(await _call_customgpt_task(
-        COMMUNITY_PROJECT_ID,
-        promptText,
-        "Community_Educator",
-        action_id=None,
-        poll_seconds=DEFAULT_POLL_SECONDS,
-    ))
+    return _specialist_result(
+        await _call_customgpt_task(
+            COMMUNITY_PROJECT_ID,
+            promptText,
+            "Community_Educator",
+            action_id=None,
+            poll_seconds=DEFAULT_POLL_SECONDS,
+        )
+    )
 
 
 @mcp.tool
@@ -4210,15 +4507,27 @@ async def Assessment_Context_Expert(promptText: str) -> str:
     """
     action_id = HOMEHARVEST_ACTION_ID if _should_enable_homeharvest(promptText) else None
     needs_report = _request_needs_report_generation(promptText)
-    poll_seconds = HOMEHARVEST_POLL_SECONDS if action_id else (REPORT_GENERATION_POLL_SECONDS if needs_report else DEFAULT_POLL_SECONDS)
-    _log("Assessment_Context_Expert invoked", homeharvest_enabled=bool(action_id), report_generation=needs_report, action_id=action_id or "", poll_seconds=poll_seconds)
-    return _specialist_result(await _call_customgpt_task(
-        ASSESSMENT_PROJECT_ID,
-        promptText,
-        "Assessment_Context_Expert",
-        action_id=action_id,
+    poll_seconds = (
+        HOMEHARVEST_POLL_SECONDS
+        if action_id
+        else (REPORT_GENERATION_POLL_SECONDS if needs_report else DEFAULT_POLL_SECONDS)
+    )
+    _log(
+        "Assessment_Context_Expert invoked",
+        homeharvest_enabled=bool(action_id),
+        report_generation=needs_report,
+        action_id=action_id or "",
         poll_seconds=poll_seconds,
-    ))
+    )
+    return _specialist_result(
+        await _call_customgpt_task(
+            ASSESSMENT_PROJECT_ID,
+            promptText,
+            "Assessment_Context_Expert",
+            action_id=action_id,
+            poll_seconds=poll_seconds,
+        )
+    )
 
 
 @mcp.tool
@@ -4241,13 +4550,15 @@ async def Compliance_Expert(promptText: str) -> str:
     It may return a Task ID / Project ID when still processing.
     """
     _log("Compliance_Expert invoked", poll_seconds=DEFAULT_POLL_SECONDS)
-    return _specialist_result(await _call_customgpt_task(
-        COMPLIANCE_PROJECT_ID,
-        promptText,
-        "Compliance_Expert",
-        action_id=None,
-        poll_seconds=DEFAULT_POLL_SECONDS,
-    ))
+    return _specialist_result(
+        await _call_customgpt_task(
+            COMPLIANCE_PROJECT_ID,
+            promptText,
+            "Compliance_Expert",
+            action_id=None,
+            poll_seconds=DEFAULT_POLL_SECONDS,
+        )
+    )
 
 
 @mcp.tool
@@ -4267,15 +4578,17 @@ async def Smart_Tasks(promptText: str) -> str:
         agent_capability=SMART_TASKS_AGENT_CAPABILITY,
         response_source=SMART_TASKS_RESPONSE_SOURCE,
     )
-    return _specialist_result(await _call_customgpt_task(
-        SMART_TASKS_PROJECT_ID,
-        promptText,
-        "Smart_Tasks",
-        action_id=None,
-        poll_seconds=SMART_TASKS_POLL_SECONDS,
-        agent_capability=SMART_TASKS_AGENT_CAPABILITY,
-        response_source=SMART_TASKS_RESPONSE_SOURCE,
-    ))
+    return _specialist_result(
+        await _call_customgpt_task(
+            SMART_TASKS_PROJECT_ID,
+            promptText,
+            "Smart_Tasks",
+            action_id=None,
+            poll_seconds=SMART_TASKS_POLL_SECONDS,
+            agent_capability=SMART_TASKS_AGENT_CAPABILITY,
+            response_source=SMART_TASKS_RESPONSE_SOURCE,
+        )
+    )
 
 
 @mcp.tool
@@ -4289,7 +4602,6 @@ async def ArcGIS_Public_Parcel_Lookup(searchText: str, maxResults: int = 10) -> 
     """
     result = await _arcgis_public_parcel_lookup_result(searchText, maxResults)
     return _format_arcgis_parcel_lookup_text(result)
-
 
 
 @mcp.tool
@@ -4323,20 +4635,22 @@ async def Check_CustomGPT_Task(projectId: str, taskId: str) -> str:
     returned still_running. Takes projectId and taskId and returns the final answer
     if the task has completed.
     """
-    return _specialist_result(await _check_customgpt_task_result(project_id=str(projectId).strip(), task_id=str(taskId).strip()))
+    return _specialist_result(
+        await _check_customgpt_task_result(project_id=str(projectId).strip(), task_id=str(taskId).strip())
+    )
 
 
 def _count(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
 
 
-def _upc_router_parse(value: Any) -> Dict[str, List[str]]:
+def _upc_router_parse(value: Any) -> dict[str, list[str]]:
     """
     Sort a pasted UPC list into what the route planner can take. It routes by
     parcel, so only 18-digit real property UPCs work. A 20-character account is
     routed by its 18-digit parcel UPC; 6-digit MH/PP accounts have no parcel.
     """
-    out: Dict[str, List[str]] = {"upcs": [], "trimmed": [], "mh_pp": [], "invalid": [], "duplicates": []}
+    out: dict[str, list[str]] = {"upcs": [], "trimmed": [], "mh_pp": [], "invalid": [], "duplicates": []}
     seen = set()
     # Split on commas, semicolons and line breaks only, so "1-001-049-..." and
     # space-grouped UPCs stay whole.
@@ -4384,7 +4698,8 @@ async def UPC_Router_Link(upcs: str) -> str:
         )
     if parsed["invalid"]:
         problems.append(
-            f"Skipped {_count(len(parsed['invalid']), 'entry that isn\'t a UPC', 'entries that aren\'t UPCs')}: " + ", ".join(parsed["invalid"][:10])
+            f"Skipped {_count(len(parsed['invalid']), "entry that isn't a UPC", "entries that aren't UPCs")}: "
+            + ", ".join(parsed["invalid"][:10])
         )
     if not found:
         raise ToolError(
@@ -4438,6 +4753,7 @@ aces_chat.register_chat(mcp, log=_log)
 # /mcp API key (stopgap until Entra OAuth on the County AI Lab server)
 # ---------------------------------------------------------------------------
 
+
 def _requires_mcp_key(path: str) -> bool:
     """/mcp and /chat both run tools, so both need the MCP access key or a county sign-in."""
     return path == "/mcp" or path.startswith("/mcp/") or path == "/chat"
@@ -4446,7 +4762,7 @@ def _requires_mcp_key(path: str) -> bool:
 class McpApiKeyMiddleware:
     """
     Require the API key on /mcp and /chat. Other routes are unaffected: / and
-    /health stay open for Render health checks, /ui is a static page, REST routes
+    /health stay open for health probes, /ui is a static page, REST routes
     keep their own admin token, and /context-expert-file links stay
     unguessable-token links for staff.
 
@@ -4471,7 +4787,9 @@ class McpApiKeyMiddleware:
             if not allowed:
                 _log("Request blocked - signed-in user not on the access list", path=path, user=user)
                 response = JSONResponse(
-                    {"error": "Your account isn't on the A.C.E.S. access list. Ask the A.C.E.S. administrator to add you."},
+                    {
+                        "error": "Your account isn't on the A.C.E.S. access list. Ask the A.C.E.S. administrator to add you."
+                    },
                     status_code=403,
                 )
                 await response(scope, receive, send)
@@ -4510,6 +4828,6 @@ if __name__ == "__main__":
     if not ACES_MCP_API_KEY:
         _log("WARNING: ACES_MCP_API_KEY is not set - /mcp will refuse all requests")
     port = int(os.getenv("PORT", "10000"))
-    # HOST=127.0.0.1 keeps a local run reachable only from this PC. Render needs the 0.0.0.0 default.
+    # HOST=127.0.0.1 keeps a local run reachable only from this PC. Containers need the 0.0.0.0 default.
     host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
     uvicorn.run(app, host=host, port=port)

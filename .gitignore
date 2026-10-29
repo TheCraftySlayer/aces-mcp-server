@@ -13,3 +13,13 @@ __pycache__/
 
 # Local test output
 /tmp/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.venv/

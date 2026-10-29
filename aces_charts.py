@@ -27,7 +27,7 @@ one by words from its title.
 import json
 import math
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 CHART_TOOL_NAME = "Build_Chart"
 
@@ -46,14 +46,23 @@ _CUSTOMER_FACING_NOTE = "Calls are customer-facing calls, a smaller count than t
 # Columns that mean a period's source data is incomplete when above 0, the
 # reason, and the word a charted column must contain for it to matter ("" = any).
 _INCOMPLETE_COLUMNS = {
-    "open_days_missing_calls": ("missing call data for some open days. Call totals there read low; averages use only days with data", "call"),
-    "open_days_missing_visits": ("missing visit data for some open days. Visit totals there read low; averages use only days with data", "visit"),
-    "days_missing_from_calendar": ("missing days in the office calendar, so open days and averages there may be off", ""),
+    "open_days_missing_calls": (
+        "missing call data for some open days. Call totals there read low; averages use only days with data",
+        "call",
+    ),
+    "open_days_missing_visits": (
+        "missing visit data for some open days. Visit totals there read low; averages use only days with data",
+        "visit",
+    ),
+    "days_missing_from_calendar": (
+        "missing days in the office calendar, so open days and averages there may be off",
+        "",
+    ),
     "open_days_without_report": ("missing deed reports for some open days, so deeds there read low", ""),
     "days_needing_review": ("deed days waiting for review that aren't counted yet", ""),
 }
 
-CHART_TOOL: Dict[str, Any] = {
+CHART_TOOL: dict[str, Any] = {
     "name": CHART_TOOL_NAME,
     "description": (
         "Draws a line or bar chart in the chat from a data tool result that is already in this conversation. "
@@ -93,9 +102,15 @@ CHART_TOOL: Dict[str, Any] = {
                 "description": "Optional plain legend labels, same order as y.",
             },
             "yLabel": {"type": "string", "description": "Optional axis label, e.g. 'Calls per open day'."},
-            "rangeLow": {"type": "string", "description": "Optional column for the low edge of a shaded range around the first y series."},
+            "rangeLow": {
+                "type": "string",
+                "description": "Optional column for the low edge of a shaded range around the first y series.",
+            },
             "rangeHigh": {"type": "string", "description": "Optional column for the high edge of that range."},
-            "rangeLabel": {"type": "string", "description": "Plain legend label for the range, e.g. '80% forecast range'."},
+            "rangeLabel": {
+                "type": "string",
+                "description": "Plain legend label for the range, e.g. '80% forecast range'.",
+            },
             "table": {
                 "type": "string",
                 "description": "Only when the result has several sections (ACES_Daily_Briefing): words from the section title.",
@@ -123,9 +138,9 @@ _ROWS_HEADER = re.compile(r"^(\d+) row\(s\)( \(limit reached\))?\s*$")
 _ROW = re.compile(r"^(\d+)\.\s(.*)$")
 
 
-def _split_cells(body: str) -> List[Tuple[str, str]]:
+def _split_cells(body: str) -> list[tuple[str, str]]:
     """'a: 1 | b: x' -> [('a', '1'), ('b', 'x')]. A piece with no 'name:' joins the previous value."""
-    cells: List[Tuple[str, str]] = []
+    cells: list[tuple[str, str]] = []
     for piece in body.split(" | "):
         name, sep, value = piece.partition(":")
         name = name.strip()
@@ -139,10 +154,10 @@ def _split_cells(body: str) -> List[Tuple[str, str]]:
     return cells
 
 
-def parse_tables(text: str) -> List[Dict[str, Any]]:
+def parse_tables(text: str) -> list[dict[str, Any]]:
     """Every row table in a tool result: title, expected count, columns, rows (dicts keyed by lowercase column)."""
     lines = str(text or "").splitlines()
-    tables: List[Dict[str, Any]] = []
+    tables: list[dict[str, Any]] = []
     i = 0
     while i < len(lines):
         header = _ROWS_HEADER.match(lines[i].strip())
@@ -159,8 +174,8 @@ def parse_tables(text: str) -> List[Dict[str, Any]]:
         j = i + 1
         while j < len(lines) and not lines[j].strip():
             j += 1
-        columns: List[str] = []
-        rows: List[Dict[str, str]] = []
+        columns: list[str] = []
+        rows: list[dict[str, str]] = []
         while j < len(lines):
             m = _ROW.match(lines[j].rstrip())
             if not m or int(m.group(1)) != len(rows) + 1:
@@ -168,12 +183,14 @@ def parse_tables(text: str) -> List[Dict[str, Any]]:
             try:
                 cells = _split_cells(m.group(2))
             except ValueError:
-                raise ChartError(f"Couldn't read row {len(rows) + 1} of '{title}'.")
+                raise ChartError(f"Couldn't read row {len(rows) + 1} of '{title}'.") from None
             names = [c[0] for c in cells]
             if not columns:
                 columns = names
             elif [n.lower() for n in names] != [c.lower() for c in columns]:
-                raise ChartError(f"Row {len(rows) + 1} of '{title}' has different columns from row 1, so it can't be charted safely.")
+                raise ChartError(
+                    f"Row {len(rows) + 1} of '{title}' has different columns from row 1, so it can't be charted safely."
+                )
             rows.append({n.lower(): v for n, v in cells})
             j += 1
         tables.append(
@@ -183,7 +200,7 @@ def parse_tables(text: str) -> List[Dict[str, Any]]:
     return tables
 
 
-def _number(value: str) -> Optional[float]:
+def _number(value: str) -> float | None:
     """Numeric cell to float; '' or 'None' -> None; anything else non-numeric -> ValueError."""
     s = str(value or "").strip().replace(",", "")
     if s in ("", "None", "null"):
@@ -216,13 +233,14 @@ def _clip(value: Any, limit: int) -> str:
 # Building a chart
 # ---------------------------------------------------------------------------
 
-def collect_sources(conversation: List[Dict[str, Any]], full_text: Dict[str, str]) -> List[Dict[str, Any]]:
+
+def collect_sources(conversation: list[dict[str, Any]], full_text: dict[str, str]) -> list[dict[str, Any]]:
     """
     Tool results in conversation order: name, input, text, is_error.
     full_text holds untruncated results from the current request, keyed by tool_use id.
     """
-    uses: Dict[str, Dict[str, Any]] = {}
-    sources: List[Dict[str, Any]] = []
+    uses: dict[str, dict[str, Any]] = {}
+    sources: list[dict[str, Any]] = []
     for message in conversation:
         content = message.get("content")
         if not isinstance(content, list):
@@ -246,7 +264,7 @@ def collect_sources(conversation: List[Dict[str, Any]], full_text: Dict[str, str
     return sources
 
 
-def _pick_table(tables: List[Dict[str, Any]], needed: List[str], hint: str, source_name: str) -> Dict[str, Any]:
+def _pick_table(tables: list[dict[str, Any]], needed: list[str], hint: str, source_name: str) -> dict[str, Any]:
     with_rows = [t for t in tables if t["rows"]]
     if not with_rows:
         raise ChartError(f"The {source_name} result has no rows to chart.")
@@ -268,7 +286,7 @@ def _pick_table(tables: List[Dict[str, Any]], needed: List[str], hint: str, sour
     return fits[0]
 
 
-def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], str]:
+def build_chart(args: dict[str, Any], sources: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
     """Returns (spec for the browser, summary for the model). Raises ChartError with a plain reason."""
     source_name = _clip(args.get("sourceTool"), 100)
     if not source_name:
@@ -284,7 +302,9 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
     if not x_col or not y_cols:
         raise ChartError("Give the x column and at least one y column.")
     if len(y_cols) > MAX_SERIES:
-        raise ChartError(f"Up to {MAX_SERIES} series fit on one chart; {len(y_cols)} were asked for. Split it into two charts.")
+        raise ChartError(
+            f"Up to {MAX_SERIES} series fit on one chart; {len(y_cols)} were asked for. Split it into two charts."
+        )
     if len(set(y_cols)) != len(y_cols):
         raise ChartError("The same y column is listed twice.")
 
@@ -326,15 +346,17 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
     limit = MAX_BAR_POINTS if chart_type == "bar" else MAX_LINE_POINTS
     if len(rows) > limit:
         hint = " Use a line chart, or a coarser grain." if chart_type == "bar" else " Use a coarser grain."
-        raise ChartError(f"{len(rows)} points is more than a {chart_type} chart can show clearly (limit {limit}).{hint}")
+        raise ChartError(
+            f"{len(rows)} points is more than a {chart_type} chart can show clearly (limit {limit}).{hint}"
+        )
 
-    def column_values(col: str) -> List[Optional[float]]:
-        out: List[Optional[float]] = []
+    def column_values(col: str) -> list[float | None]:
+        out: list[float | None] = []
         for n, row in enumerate(rows, start=1):
             try:
                 out.append(_number(row.get(col, "")))
             except ValueError:
-                raise ChartError(f"{col} isn't a numeric column (row {n} has '{_clip(row.get(col), 40)}').")
+                raise ChartError(f"{col} isn't a numeric column (row {n} has '{_clip(row.get(col), 40)}').") from None
         return out
 
     original = {c.lower(): c for c in table["columns"]}
@@ -344,7 +366,11 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         values = column_values(col)
         if all(v is None for v in values):
             raise ChartError(f"{original.get(col, col)} has no numbers in this result.")
-        label = _clip(labels_in[k], MAX_LABEL_CHARS) if k < len(labels_in) and _clip(labels_in[k], MAX_LABEL_CHARS) else _pretty(original.get(col, col))
+        label = (
+            _clip(labels_in[k], MAX_LABEL_CHARS)
+            if k < len(labels_in) and _clip(labels_in[k], MAX_LABEL_CHARS)
+            else _pretty(original.get(col, col))
+        )
         series.append({"label": label, "column": original.get(col, col), "values": values})
 
     band = None
@@ -354,7 +380,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         if chart_type != "line":
             raise ChartError("A shaded range only works on a line chart.")
         low, high = column_values(low_col), column_values(high_col)
-        for n, (lo, hi) in enumerate(zip(low, high), start=1):
+        for n, (lo, hi) in enumerate(zip(low, high, strict=True), start=1):
             if lo is not None and hi is not None and lo > hi:
                 raise ChartError(f"Row {n} has {low_col} above {high_col}; check the column order.")
         band = {"low": low, "high": high, "label": _clip(args.get("rangeLabel"), MAX_LABEL_CHARS) or "Range"}
@@ -364,7 +390,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
             band, band_alt = band_alt, band
             opened_on_80 = True
 
-    notes: List[str] = []
+    notes: list[str] = []
     if "partial_days" in rows[0]:
         partial = [r for r in rows if (_safe_number(r.get("partial_days")) or 0) > 0]
         # Averages already leave today out, so only totals need the note.
@@ -380,17 +406,20 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
                 notes.append(f"{count} {'period has' if count == 1 else 'periods have'} {meaning}.")
     if "DEED DATA GAP" in source["text"] and source_name in ("ACES_Deed_Volume", "ACES_Daily_Briefing"):
         notes.append("Deed data has a loading gap: the most recent deed figures are incomplete, not zero.")
-    stale = re.search(r"STALE FORECAST: the newest forecast here was made on (\d{4}-\d{2}-\d{2}), (\d+) days ago",
-                      source["text"])
+    stale = re.search(
+        r"STALE FORECAST: the newest forecast here was made on (\d{4}-\d{2}-\d{2}), (\d+) days ago", source["text"]
+    )
     if stale and source_name in ("ACES_Forecast", "ACES_Daily_Briefing"):
-        notes.append(f"This forecast was made {_friendly_x(stale.group(1))} ({stale.group(2)} days ago) "
-                     "and hasn't been updated since, so it's out of date.")
+        notes.append(
+            f"This forecast was made {_friendly_x(stale.group(1))} ({stale.group(2)} days ago) "
+            "and hasn't been updated since, so it's out of date."
+        )
     if table["limit_reached"]:
         notes.append("The data tool stopped at its row limit, so later periods aren't shown.")
 
     # Captions: shown under the chart and on a saved image, which travels without the chat,
     # but not data problems, so the model isn't asked to repeat them.
-    captions: List[str] = []
+    captions: list[str] = []
     if source_name in _FORECAST_SOURCES and not stale:
         made = _newest_made_date(rows)
         if made:
@@ -404,7 +433,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
     # Periods when the office was closed the whole time (weekends, holidays) are shaded,
     # so dips read as closures, not demand. Blank open_days means the calendar isn't
     # loaded for that period, so it isn't marked either way.
-    closed: Optional[List[bool]] = None
+    closed: list[bool] | None = None
     if "open_days" in rows[0]:
         marks = [_safe_number(r.get("open_days")) == 0 for r in rows]
         if any(marks) and not all(marks):
@@ -418,11 +447,13 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
     if by_measure:
         chart_type = "bar"
         x_spec = {"label": "Measure", "values": [s["label"] for s in series]}
-        series = [{
-            "label": _clip(args.get("yLabel"), MAX_LABEL_CHARS) or "Value",
-            "column": ", ".join(s["column"] for s in series),
-            "values": [s["values"][0] for s in series],
-        }]
+        series = [
+            {
+                "label": _clip(args.get("yLabel"), MAX_LABEL_CHARS) or "Value",
+                "column": ", ".join(s["column"] for s in series),
+                "values": [s["values"][0] for s in series],
+            }
+        ]
         closed = None
     else:
         x_spec = {"label": _pretty(original.get(x_col, x_col)), "values": [_x_value(r.get(x_col, "")) for r in rows]}
@@ -461,7 +492,9 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
         if opened_on_80:
             summary += f" The chart opens on the {band['label']}; to see the 95% range, the user clicks Show 95% range."
     if closed:
-        summary += f" Days or periods when the office was closed ({sum(closed)}) are shaded on the chart and labeled Closed."
+        summary += (
+            f" Days or periods when the office was closed ({sum(closed)}) are shaded on the chart and labeled Closed."
+        )
     if notes:
         summary += " Data notes to pass along: " + " ".join(notes)
     summary += " The chart is on screen; give the takeaway in a sentence or two rather than repeating its numbers."
@@ -472,7 +505,7 @@ def build_chart(args: Dict[str, Any], sources: List[Dict[str, Any]]) -> Tuple[Di
 _RANGE_LEVELS = ("80", "95")
 
 
-def _alternate_band(rows, low_col, high_col, label, column_values) -> Optional[Dict[str, Any]]:
+def _alternate_band(rows, low_col, high_col, label, column_values) -> dict[str, Any] | None:
     """The other forecast range (95% for an 80% band, or 80% for a 95% band) when the result has it, else None."""
     for have, other in (_RANGE_LEVELS, _RANGE_LEVELS[::-1]):
         if have in low_col and have in high_col:
@@ -486,7 +519,9 @@ def _alternate_band(rows, low_col, high_col, label, column_values) -> Optional[D
         low, high = column_values(alt_low), column_values(alt_high)
     except ChartError:
         return None
-    if all(v is None for v in low) or any(lo is not None and hi is not None and lo > hi for lo, hi in zip(low, high)):
+    if all(v is None for v in low) or any(
+        lo is not None and hi is not None and lo > hi for lo, hi in zip(low, high, strict=True)
+    ):
         return None
     alt_label = label.replace(have + "%", other + "%") if have + "%" in label else f"{other}% range"
     return {"low": low, "high": high, "label": alt_label}
@@ -495,7 +530,7 @@ def _alternate_band(rows, low_col, high_col, label, column_values) -> Optional[D
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-def _newest_made_date(rows: List[Dict[str, str]]) -> str:
+def _newest_made_date(rows: list[dict[str, str]]) -> str:
     """Newest YYYY-MM-DD in a column that says when the forecast was made (as_of_date and the like), or ""."""
     best = ""
     for col in rows[0]:
@@ -525,13 +560,13 @@ def _friendly_x(value: Any) -> str:
     return s or "The latest period"
 
 
-def _safe_number(value: Any) -> Optional[float]:
+def _safe_number(value: Any) -> float | None:
     try:
         return _number(value)
     except (TypeError, ValueError):
         return None
 
 
-def chart_result_content(spec: Dict[str, Any], summary: str) -> str:
+def chart_result_content(spec: dict[str, Any], summary: str) -> str:
     """What gets stored as the tool result: the browser redraws the chart from it after a reload."""
     return json.dumps({"summary": summary, "chart": spec}, ensure_ascii=False, separators=(",", ":"))
