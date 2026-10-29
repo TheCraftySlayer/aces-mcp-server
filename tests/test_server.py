@@ -154,3 +154,22 @@ def test_rest_routes_treat_a_body_that_isnt_json_as_empty(client):
     )
     assert response.status_code == 200
     assert response.json()["answer"] == "Missing promptText."
+
+
+def test_every_rest_route_except_file_links_needs_the_admin_token(client):
+    for method, path in [
+        ("GET", "/task-cache"),
+        ("POST", "/task-cache/clear"),
+        ("GET", "/check-task?task_id=1"),
+        ("GET", "/arcgis-parcel-lookup?searchText=x"),
+        ("GET", "/arcgis-parcel-map?searchText=x"),
+        ("GET", "/arcgis-candidate-peers?searchText=x"),
+        ("POST", "/start-lookup"),
+        ("POST", "/check-pending-task"),
+        ("POST", "/smart-task"),
+        ("POST", "/agent-call"),
+        ("GET", "/health/details"),
+    ]:
+        assert client.request(method, path).status_code == 401, path
+    # A download link's random token is its credential; an unknown one finds nothing.
+    assert client.get("/context-expert-file/not-a-real-token").status_code == 404

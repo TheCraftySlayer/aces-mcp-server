@@ -95,7 +95,12 @@ if ($shortcut) {
 
 # --- Checks -------------------------------------------------------------------
 
-foreach ($file in @("server.py", "aces_sql_tools.py", "aces_chat.py", "aces_charts.py", "web_ui.html", "requirements.txt")) {
+$neededFiles = @(
+    "server.py", "aces_common.py", "aces_access.py", "aces_arcgis.py", "aces_routing.py", "aces_customgpt.py",
+    "aces_rest.py", "aces_sql_tools.py", "aces_chat.py", "aces_charts.py", "aces_facts.py", "aces_facts.json",
+    "web_ui.html", "requirements.txt"
+)
+foreach ($file in $neededFiles) {
     if (-not (Test-Path $file)) { Stop-WithMessage "$file is missing from $PSScriptRoot. Put this launcher in the server folder." }
 }
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {

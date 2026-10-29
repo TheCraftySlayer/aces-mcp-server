@@ -7,7 +7,7 @@ import httpx
 import pytest
 from conftest import TEST_ADMIN_TOKEN
 
-import server
+import aces_customgpt
 
 PATH_TRICK = "9262/../../../v1/projects/12345/conversations?x="
 
@@ -22,16 +22,16 @@ def no_outgoing_requests(monkeypatch):
 
 
 def test_only_configured_projects_are_allowed():
-    assert server._require_config("9262", "Compliance_Expert") is None
-    assert "Unknown project ID" in server._require_config("12345", "Compliance_Expert")
-    assert "Unknown project ID" in server._require_config(PATH_TRICK, "Compliance_Expert")
+    assert aces_customgpt._require_config("9262", "Compliance_Expert") is None
+    assert "Unknown project ID" in aces_customgpt._require_config("12345", "Compliance_Expert")
+    assert "Unknown project ID" in aces_customgpt._require_config(PATH_TRICK, "Compliance_Expert")
 
 
 def test_ids_cannot_carry_a_path():
-    assert server._valid_customgpt_id("6f1c2a9e-1234-4b3e-9a77-0c1d2e3f4a5b")
-    assert server._valid_customgpt_id("123456")
+    assert aces_customgpt._valid_customgpt_id("6f1c2a9e-1234-4b3e-9a77-0c1d2e3f4a5b")
+    assert aces_customgpt._valid_customgpt_id("123456")
     for bad in ["", "1/2", "../1", "1?x=2", "1%2F2", "1 2", "a" * 65]:
-        assert not server._valid_customgpt_id(bad), bad
+        assert not aces_customgpt._valid_customgpt_id(bad), bad
 
 
 def test_check_task_refuses_an_unknown_project(call_tool, no_outgoing_requests):

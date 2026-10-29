@@ -12,7 +12,7 @@ How it works
   - Two model providers are supported. The conversation is always stored in the
     same shape (text, tool_use and tool_result blocks), so the browser page and
     the tool loop don't change when the provider does; only _call_model differs.
-  - /chat is guarded by the same x-aces-mcp-key check as /mcp (see server.py).
+  - /chat is guarded by the same x-aces-mcp-key check as /mcp (see aces_access.py).
   - Build_Chart (aces_charts.py) is offered to the chat model as one more tool
     but runs here, not through MCP. It reads values from a data tool result
     already in the conversation, never from the model, and the browser draws it.
@@ -776,7 +776,7 @@ async def _run_chat(mcp, history: list[dict[str, Any]], emit, log) -> None:
 
 
 def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
-    """Register POST /chat. The x-aces-mcp-key check happens in server.py's middleware."""
+    """Register POST /chat. The x-aces-mcp-key check happens in the middleware in aces_access.py."""
 
     @mcp.custom_route("/chat", methods=["POST"])
     async def chat_route(request):
@@ -794,7 +794,7 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
         except ChatError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
-        # Set by server.py's middleware when the request came from a county sign-in.
+        # Set by the middleware in aces_access.py when the request came from a county sign-in.
         user = str((request.scope.get("state") or {}).get("aces_user") or "")
 
         def chat_log(message: str, **kwargs: Any) -> None:

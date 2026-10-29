@@ -102,7 +102,8 @@ Write-Step "4. Compile"
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Stop-Deploy "python isn't on PATH. Install it, or run from the shell where start-aces.bat works."
 }
-python -m py_compile server.py aces_chat.py aces_sql_tools.py aces_charts.py aces_facts.py
+$pyFiles = @(Get-ChildItem -Filter *.py -File | ForEach-Object { $_.Name })
+python -m py_compile $pyFiles
 if ($LASTEXITCODE -ne 0) { Stop-Deploy "a Python file doesn't compile (see the error above)." }
 Write-Ok "Python files compile"
 
