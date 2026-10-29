@@ -27,7 +27,8 @@ DESCRIPTION = (
     "citations, office contact details) from a reviewed file, not a chatbot. Call it before giving staff any "
     "figure, deadline or citation, and compare the specialist's answer with it. topic is one of: {topics}. "
     "tax_year is optional, for example 2026. A REVIEWED fact wins over a specialist answer that differs. "
-    "OPEN items are unsettled: say so and refer staff to a supervisor instead of answering. If the result "
+    "OPEN items are unsettled: say so and refer staff to a supervisor instead of answering, and leave out "
+    "anything a specialist says on an OPEN point, even with attribution. If the result "
     "says there is no reviewed figure for a tax year, don't give one."
 )
 
@@ -99,7 +100,9 @@ def key_facts(topic: str = "", tax_year: int | None = None, today: dt.date | Non
         out.append("\nNo reviewed facts for this topic yet. Say the answer hasn't been checked against reviewed facts.")
 
     if open_:
-        out.append("\nOPEN (not settled; don't state an answer)")
+        out.append(
+            "\nOPEN (not settled. Don't state an answer, and leave out anything a specialist says on these points.)"
+        )
         for f in open_:
             out.append(f"- [{f['id']}] {f['fact']} Next step: {f.get('ask', 'refer staff to a supervisor')}")
 

@@ -42,7 +42,9 @@ def test_reviewed_needs_a_name_and_a_date(facts_file):
 def test_open_items_are_flagged_not_answered(facts_file):
     facts_file([row(id="q", status="open", ask="ask a supervisor")])
     text = aces_facts.key_facts("value freeze", today=TODAY)
-    assert "OPEN (not settled; don't state an answer)" in text
+    assert (
+        "OPEN (not settled. Don't state an answer, and leave out anything a specialist says on these points.)" in text
+    )
     assert "No reviewed facts for this topic yet" in text
 
 

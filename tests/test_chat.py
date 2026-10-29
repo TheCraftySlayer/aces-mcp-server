@@ -78,3 +78,13 @@ def test_chat_runs_a_tool_and_answers(client, monkeypatch):
     assert "#upcs=101205704525130303" in tool_result["content"]
     # The chat model gets the MCP tools plus the chat-only chart tool.
     assert "Build_Chart" in seen_tools[0] and "ACES_Key_Facts" in seen_tools[0]
+
+
+def test_open_items_rule_covers_specialist_text():
+    # Oct 29, 2026: asked "What statute sets the 3% residential value limit?", the chat relayed a
+    # specialist's claim about an exception the reviewed facts mark OPEN. These lines keep the rule
+    # that stops that from being edited out by accident. They don't prove the model follows it;
+    # the repeated-question check in the QA plan does that.
+    prompt = aces_chat._system_prompt()
+    assert "Check every part of a specialist's answer against every OPEN item returned" in prompt
+    assert "even if you would attribute it or hedge it" in prompt

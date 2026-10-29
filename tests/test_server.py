@@ -54,6 +54,13 @@ def test_instructions_name_every_non_sql_tool():
             assert name in server.mcp.instructions, name
 
 
+def test_key_facts_tells_every_caller_to_drop_specialist_text_on_open_points(rpc):
+    # Copilot Studio gets this description and the tool output, not the chat page's instructions.
+    _, body = rpc("tools/list")
+    facts = next(t for t in body["result"]["tools"] if t["name"] == "ACES_Key_Facts")
+    assert "leave out anything a specialist says on an OPEN point" in facts["description"]
+
+
 def test_mcp_needs_the_access_key(rpc):
     assert rpc("tools/list", key=None)[0] == 401
     assert rpc("tools/list", key="wrong-key")[0] == 401
