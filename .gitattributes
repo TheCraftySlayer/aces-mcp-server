@@ -1,0 +1,4 @@
+# Store text with LF in git; Windows checkouts get CRLF through core.autocrlf as usual.
+* text=auto
+# cmd.exe can misread batch files with LF endings.
+*.bat text eol=crlf
