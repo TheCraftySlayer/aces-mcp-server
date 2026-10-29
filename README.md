@@ -134,6 +134,12 @@ docker build -t aces-mcp .
 docker run -p 8000:8000 -e ACES_MCP_API_KEY=... aces-mcp
 ```
 
+`.dockerignore` is an allowlist: the image gets `server.py`, the `aces_*.py` modules,
+`aces_facts.json`, `web_ui.html` and `requirements.txt`, and nothing else from the
+folder, so a stray `.env` or token file can't be built in. `tests/test_container.py`
+checks this. The server runs as an unprivileged `aces` user and writes only its two
+cache files.
+
 ### Deploying to Azure App Service
 
 `.\deploy.ps1` from the repo folder. It refuses to deploy uncommitted or unpushed code,
