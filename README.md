@@ -15,33 +15,10 @@ system.
 
 ## How it fits together
 
-```mermaid
-flowchart LR
-    subgraph county["County network"]
-        staff["Staff browser /ui"]
-        server["A.C.E.S. server<br/>read-only"]
-        sql[("ACES database<br/>ai_api procedures")]
-        facts["aces_facts.json<br/>reviewed facts"]
-        arcgis["Assessor parcel map<br/>assessormap.bernco.gov"]
-    end
-    entra["Microsoft Entra ID<br/>county sign-in"]
-    copilot["Copilot Studio agent"]
-    pa["Power Automate flows"]
-    customgpt["CustomGPT specialist agents<br/>under contract with the office"]
-    model["Azure OpenAI or Anthropic"]
+![A.C.E.S. architecture: callers outside the county on the left, the county network in the middle, outside services on the right](docs/architecture.png)
 
-    staff -->|signs in| entra
-    staff -->|POST /chat, signed-in session| server
-    copilot -->|MCP /mcp, access key| server
-    pa -->|REST, admin token| server
-    copilot -->|ACES_SQL tool, its own connection| sql
-    server -->|verifies sign-in| entra
-    server --> sql
-    server --> facts
-    server --> customgpt
-    server -->|parcel lookups| arcgis
-    server -->|chat only| model
-```
+The picture is drawn by `docs/architecture.py`. To change it, edit that file and run
+`python docs/architecture.py` (it needs `matplotlib`, which the server doesn't).
 
 Everything inside the box runs on county systems. Every arrow that crosses its edge carries
 data to or from an outside service, and "What data goes where" below says what each one
