@@ -78,3 +78,47 @@ def test_the_real_facts_file_is_well_formed():
         if f["status"] == "reviewed":
             assert f.get("reviewed_by") and f.get("last_reviewed"), f"{f['id']} is reviewed but not signed"
             dt.date.fromisoformat(f["last_reviewed"])
+
+
+def _signed(**fields):
+    return row(status="reviewed", reviewed_by="A. Reviewer", last_reviewed="2026-10-28", **fields)
+
+
+def test_a_current_cosign_is_shown(facts_file):
+    r = _signed()
+    r.update(cosigned_by="Topic Owner", cosigned="2026-10-29", cosign_fingerprint=aces_facts.fingerprint(r))
+    facts_file([r])
+    assert "Co-signed by Topic Owner, 2026-10-29." in aces_facts.key_facts("value freeze", today=TODAY)
+
+
+def test_a_cosign_lapses_when_the_fact_changes(facts_file):
+    r = _signed()
+    r.update(cosigned_by="Topic Owner", cosigned="2026-10-29", cosign_fingerprint=aces_facts.fingerprint(r))
+    r["fact"] = "A different fact."
+    assert aces_facts.cosign_state(r) == "stale"
+    facts_file([r])
+    assert "Co-signed" not in aces_facts.key_facts("value freeze", today=TODAY)
+
+
+def test_the_reviewer_cant_cosign_their_own_row():
+    r = _signed()
+    r.update(cosigned_by="a. reviewer", cosigned="2026-10-29", cosign_fingerprint=aces_facts.fingerprint(r))
+    assert aces_facts.cosign_state(r) == "none"
+
+
+def test_required_cosign_turns_unsigned_rows_into_drafts(facts_file, monkeypatch):
+    monkeypatch.setattr(aces_facts, "REQUIRE_COSIGN", True)
+    good = _signed(id="good")
+    good.update(cosigned_by="Topic Owner", cosigned="2026-10-29", cosign_fingerprint=aces_facts.fingerprint(good))
+    facts_file([good, _signed(id="alone")])
+    reviewed, draft = aces_facts.key_facts("value freeze", today=TODAY).split("DRAFT")
+    assert "[good]" in reviewed
+    assert "[alone]" in draft
+
+
+def test_cosign_fields_in_the_real_file_are_complete():
+    with open(aces_facts.FACTS_PATH, encoding="utf-8") as fh:
+        data = json.load(fh)
+    for f in data["facts"]:
+        fields = [f.get("cosigned_by"), f.get("cosigned"), f.get("cosign_fingerprint")]
+        assert all(fields) or not any(fields), f"{f['id']} has a partial co-signature"

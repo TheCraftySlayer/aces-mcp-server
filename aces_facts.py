@@ -10,9 +10,17 @@ Row status in aces_facts.json:
   reviewed  signed off: reviewed_by and last_reviewed are filled in. Authoritative.
   draft     sourced but not signed off. Listed, but not used as a check.
   open      a question nobody has settled. The chat says so instead of answering.
+
+Co-signing: a second person, the one who owns the topic (the Value Freeze team for value
+freeze, a supervisor for protests), can co-sign a reviewed row with sign_facts.py --cosign.
+The co-signature records a fingerprint of the row's topic, tax year, fact and source, so it
+stops counting the moment any of those change. The co-signer has to be someone other than
+the reviewer. With ACES_FACTS_REQUIRE_COSIGN=true, a reviewed row without a current
+co-signature is treated as a draft: turn that on once the topic owners have signed.
 """
 
 import datetime as dt
+import hashlib
 import json
 import os
 
@@ -23,6 +31,7 @@ FACTS_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "aces_facts.json"),
 )
 REVIEW_MAX_DAYS = int(os.getenv("ACES_FACTS_REVIEW_DAYS", "365"))
+REQUIRE_COSIGN = os.getenv("ACES_FACTS_REQUIRE_COSIGN", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 DESCRIPTION = (
     "Read-only. Returns staff-reviewed key facts (dollar limits, deadlines, exemption amounts, statute "
@@ -44,10 +53,29 @@ def _load():
     return topics, facts
 
 
+def fingerprint(f) -> str:
+    """What a co-signature vouches for. Changing the topic, tax year, fact or source changes it."""
+    basis = [f.get("topic"), f.get("tax_year"), f.get("fact"), f.get("source")]
+    return hashlib.sha256(json.dumps(basis, ensure_ascii=True).encode("ascii")).hexdigest()[:16]
+
+
+def cosign_state(f) -> str:
+    """'cosigned', 'none' (nobody has), or 'stale' (the row changed after it was co-signed)."""
+    if not (f.get("cosigned_by") and f.get("cosigned")):
+        return "none"
+    if f.get("cosign_fingerprint") != fingerprint(f):
+        return "stale"
+    if str(f.get("cosigned_by")).strip().lower() == str(f.get("reviewed_by", "")).strip().lower():
+        return "none"  # the reviewer can't co-sign their own row
+    return "cosigned"
+
+
 def _status(f):
     s = (f.get("status") or "draft").strip().lower()
     if s == "reviewed" and not (f.get("reviewed_by") and f.get("last_reviewed")):
         return "draft"  # can't count as reviewed without a name and a date
+    if s == "reviewed" and REQUIRE_COSIGN and cosign_state(f) != "cosigned":
+        return "draft"  # co-signing is required and this row doesn't have a current one
     return s if s in ("reviewed", "draft", "open") else "draft"
 
 
@@ -95,9 +123,10 @@ def key_facts(topic: str = "", tax_year: int | None = None, today: dt.date | Non
         for f in reviewed:
             yr = f", tax year {f['tax_year']}" if f.get("tax_year") is not None else ""
             flag = " REVIEW OVERDUE, say so." if _overdue(f, today) else ""
+            cosign = f" Co-signed by {f['cosigned_by']}, {f['cosigned']}." if cosign_state(f) == "cosigned" else ""
             out.append(
                 f"- [{f['id']}{yr}] {f['fact']} | Source: {f.get('source', '')} | "
-                f"Reviewed by {f['reviewed_by']}, {f['last_reviewed']}.{flag}"
+                f"Reviewed by {f['reviewed_by']}, {f['last_reviewed']}.{cosign}{flag}"
             )
     else:
         out.append("\nNo reviewed facts for this topic yet. Say the answer hasn't been checked against reviewed facts.")
