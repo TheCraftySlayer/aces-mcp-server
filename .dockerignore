@@ -7,4 +7,7 @@
 !aces_*.py
 !aces_facts.json
 !web_ui.html
+# The chat page's fonts and their licenses.
+!fonts
+!fonts/*
 !requirements.txt

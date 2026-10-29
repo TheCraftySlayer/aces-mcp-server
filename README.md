@@ -43,6 +43,7 @@ flowchart LR
 | `aces_facts.py`, `aces_facts.json` | `ACES_Key_Facts`: staff-reviewed figures, deadlines and citations. |
 | `sign_facts.py` | Signs reviewed facts rows with a reviewer's name and today's date. |
 | `web_ui.html` | The staff chat page. |
+| `fonts/` | The chat page's two typefaces (Public Sans, IBM Plex Mono) and their SIL Open Font License files, served by the server so the page calls no outside site. |
 | `start-aces.bat`, `start-aces.ps1` | Starts the server on a Windows PC and opens the chat. |
 | `deploy.ps1` | Builds and deploys the container to Azure App Service, with checks and automatic rollback. |
 | `Dockerfile` | Container image: Python 3.12 plus Microsoft ODBC Driver 18. |
@@ -87,6 +88,7 @@ settings are present. Without them the server lists 11 tools.
 | `/start-lookup`, `/check-pending-task`, `/smart-task`, `/agent-call`, `/data-tool`, `/arcgis-*` | Power Automate, with the admin token in the `x-aces-admin-token` header. |
 | `/task-cache`, `/task-cache/clear`, `/check-task`, `/health/details` | Admin token only. Off when no admin token is set. `/health/details` shows the settings in effect and the tools actually registered. |
 | `/context-expert-file/{token}` | Anyone with the link. Tokens are random and expire (`ACES_FILE_LINK_TTL_SECONDS`, default one day). |
+| `/fonts/{name}` | Open. Serves only the six font files in `fonts/`. |
 | `/`, `/health`, `/ui` | Open. They return no data: `/health` says only that the server is up, its build and whether chat is on. `/ui` itself sends signed-out users to the county sign-in when sign-in is on. |
 
 Points a reviewer usually asks about:
@@ -99,7 +101,8 @@ Points a reviewer usually asks about:
   authentication is turned off, the server falls back to the access key, so the headers
   can't be faked.
 - **The chat page** is served with a per-request CSP nonce, `default-src 'none'`,
-  `frame-ancestors 'none'` and `no-store`. The local launcher passes the access key in
+  `frame-ancestors 'none'` and `no-store`. It loads nothing from outside sites: its fonts come
+  from `/fonts` on the same server (`font-src 'self'`). The local launcher passes the access key in
   the URL fragment, which never reaches the server. The page keeps it in that tab's
   sessionStorage and clears it from the address bar.
 - **CustomGPT IDs**: a caller-supplied project ID must be one of this server's own
@@ -162,7 +165,7 @@ docker run -p 8000:8000 -e ACES_MCP_API_KEY=... aces-mcp
 ```
 
 `.dockerignore` is an allowlist: the image gets `server.py`, the `aces_*.py` modules,
-`aces_facts.json`, `web_ui.html` and `requirements.txt`, and nothing else from the
+`aces_facts.json`, `web_ui.html`, `fonts/` and `requirements.txt`, and nothing else from the
 folder, so a stray `.env` or token file can't be built in. `tests/test_container.py`
 checks this. The server runs as an unprivileged `aces` user and writes only its two
 cache files.
