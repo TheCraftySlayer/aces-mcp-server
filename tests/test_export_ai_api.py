@@ -23,11 +23,11 @@ def test_snapshot_lists_grants_columns_and_definitions():
             ("tool_log", "caller", "nvarchar", 256, 0, 0, True),
         ],
         grants=[
-            ("ACES_MCP_Reader", "EXECUTE", "GRANT", None),
+            ("aces-mcp-bernco", "EXECUTE", "GRANT", None),
             ("someone", "SELECT", "DENY", "tool_log"),
         ],
     )
-    assert "GRANT EXECUTE ON SCHEMA::[ai_api] TO [ACES_MCP_Reader];" in text
+    assert "GRANT EXECUTE ON SCHEMA::[ai_api] TO [aces-mcp-bernco];" in text
     assert "DENY SELECT ON [ai_api].[tool_log] TO [someone];" in text
     assert "--   logged_utc  datetime2(3)  NOT NULL" in text
     assert "--   caller  nvarchar(128)  NULL" in text

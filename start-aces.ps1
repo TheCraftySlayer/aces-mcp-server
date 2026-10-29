@@ -23,15 +23,12 @@ $secretFile = Join-Path $env:LOCALAPPDATA "ACES\local-secrets.xml"
 $packagesStamp = Join-Path $env:LOCALAPPDATA "ACES\packages-stamp.txt"
 
 # County on-prem database, used with "start-aces.bat onprem".
-# The server should sign in as ACES_MCP_Reader, which can only EXECUTE the ai_api
-# procedures (sql/55 and sql/56 create it and check it). Until the DBA has created that
-# login, this stays on ASR_CS_User, which can read and change every table, and the
-# launcher warns about it on every on-prem start. To switch: set the line below to
-# "ACES_MCP_Reader", then run "start-aces.bat reset" and enter that login's password.
+# ASR_CS_User can read and change every table. The server only ever sends EXEC of fixed
+# ai_api procedures with bound parameters (aces_sql_tools.py), and
+# tests/test_sql_read_only.py checks that for every data tool.
 $onPremSqlServer   = "asbcdbbernt"
 $onPremSqlDatabase = "ASRCustomerService"
 $onPremSqlUser     = "ASR_CS_User"
-$limitedSqlUser    = "ACES_MCP_Reader"
 
 function New-RandomKey {
     $bytes = New-Object byte[] 24
@@ -317,10 +314,6 @@ Write-Host ""
 Write-Host "Server is running." -ForegroundColor Green
 Write-Host ("  SQL tools: " + $(if ($details.sql_tools_registered) { "on" } else { "off" }))
 Write-Host ("  Database:  " + $target)
-if ($onPrem -and $onPremSqlUser -ne $limitedSqlUser) {
-    Write-Host ("  Warning:   signed in to the database as $onPremSqlUser, which can change every table. " +
-        "Switch to $limitedSqlUser (sql/55 and sql/56) before this runs anywhere but this PC.") -ForegroundColor Yellow
-}
 Write-Host ("  Chat:      " + $(if ($details.chat_enabled) { "on ($($details.chat_model))" } else { "off (no Anthropic key saved)" }))
 Write-Host ("  Workspace: " + $(if ($details.chat_workspace_set) { $env:ACES_ANTHROPIC_WORKSPACE_ID } else { "none set (chat needs one unless your Anthropic key was made inside a workspace)" }))
 Write-Host ""

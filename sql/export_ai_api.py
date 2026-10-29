@@ -1,11 +1,11 @@
 """
 Writes sql/current/ai_api.sql: every ai_api procedure, function and view as it is in the
 database right now, the columns of the ai_api tables, and every permission granted on the
-ai_api schema or its objects. Commit that file, so a reviewer can see exactly what the
-server's login is able to run, and what each procedure does, without database access.
+ai_api schema or its objects. Commit that file, so a reviewer can see exactly what each
+procedure the data tools call does, and who may run it, without database access.
 
 Run it after any ai_api change, with a login that can see definitions (ASR_CS_Owner or
-another db_owner). The server's own login can't, by design.
+another db_owner).
 
     python sql/export_ai_api.py --server asbcdbbernt --database ASRCustomerService --user ASR_CS_Owner --trust-server-cert
     python sql/export_ai_api.py --server asbcdbbernt --database ASRCustomerService --windows --trust-server-cert
