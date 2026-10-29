@@ -59,7 +59,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastmcp.exceptions import ToolError
 from starlette.responses import JSONResponse
@@ -130,7 +130,7 @@ def _today_mountain() -> date:
     """
     try:
         return datetime.now(ZoneInfo("America/Denver")).date()
-    except Exception:  # no time zone data
+    except ZoneInfoNotFoundError:  # no time zone data
         pass
     return datetime.now(UTC).date()
 
@@ -687,7 +687,7 @@ def register_sql_tools(
         if normalize_address is not None:
             try:
                 normalized = normalize_address(raw) or ""
-            except Exception:
+            except Exception:  # noqa: BLE001  normalizing is optional; the raw text still searches
                 normalized = ""
         search = (normalized or raw).upper()[:100]
         try:
@@ -730,7 +730,7 @@ def register_sql_tools(
         """One line on how current the deed data is; "" if the check itself isn't available."""
         try:
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, "ai_api.deed_freshness", [])
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  the freshness note is optional and must not fail the deed tool
             log("deed freshness check skipped", tool=tool, error=str(exc)[:300])
             return ""
         if not rows:
@@ -1058,7 +1058,7 @@ def register_sql_tools(
         try:
             body = await request.json()
             body = body if isinstance(body, dict) else {}
-        except Exception:
+        except ValueError:
             body = {}
 
         tool_name = str(body.get("tool") or "").strip()
@@ -1093,7 +1093,7 @@ def register_sql_tools(
                     "project_id": "",
                 }
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  Power Automate expects a JSON answer even when something unexpected fails
             log("data tool route failed", tool=tool_name, error=str(exc)[:500])
             return JSONResponse(
                 {

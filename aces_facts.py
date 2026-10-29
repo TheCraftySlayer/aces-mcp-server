@@ -121,7 +121,7 @@ def key_facts(topic: str = "", tax_year: int | None = None, today: dt.date | Non
 def register(mcp):
     try:
         topics, _ = _load()
-    except Exception as e:  # the tool still registers and reports the problem when called
+    except Exception as e:  # noqa: BLE001  the tool still registers and reports the problem when called
         print(f"[aces] key facts file problem: {e}")
         topics = ["(facts file unreadable)"]
 

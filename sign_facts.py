@@ -10,9 +10,11 @@ doesn't recognize. Changes nothing if any id is wrong."""
 import datetime as dt
 import json
 import sys
+from pathlib import Path
 
-P = "aces_facts.json"
-d = json.load(open(P, encoding="utf-8"))
+P = Path(__file__).resolve().parent / "aces_facts.json"
+with open(P, encoding="utf-8") as f:
+    d = json.load(f)
 rows = {f["id"]: f for f in d["facts"]}
 
 if len(sys.argv) < 2 or sys.argv[1] == "--list":
@@ -36,5 +38,6 @@ if bad or opened:
 today = dt.date.today().isoformat()
 for i in ids:
     rows[i].update(status="reviewed", reviewed_by=name, last_reviewed=today)
-json.dump(d, open(P, "w", encoding="utf-8"), indent=2, ensure_ascii=True)
+with open(P, "w", encoding="utf-8") as f:
+    json.dump(d, f, indent=2, ensure_ascii=True)
 print(f"Signed {len(ids)} row(s) as {name}, {today}:", ", ".join(ids))
