@@ -78,9 +78,9 @@ settings are present. Without them the server lists 11 tools.
 |---|---|
 | `/mcp`, `/chat` | Callers with the MCP access key (`x-aces-mcp-key` header or `Authorization: Bearer`), or a county user signed in through App Service authentication (only the accounts in `ACES_ALLOWED_USERS`, when it's set). With no key configured, key callers get 503. |
 | `/start-lookup`, `/check-pending-task`, `/smart-task`, `/agent-call`, `/data-tool`, `/arcgis-*` | Power Automate, with the admin token in the `x-aces-admin-token` header. |
-| `/task-cache`, `/task-cache/clear`, `/check-task` | Admin token only. Off when no admin token is set. |
+| `/task-cache`, `/task-cache/clear`, `/check-task`, `/health/details` | Admin token only. Off when no admin token is set. `/health/details` shows the settings in effect and the tools actually registered. |
 | `/context-expert-file/{token}` | Anyone with the link. Tokens are random and expire (`ACES_FILE_LINK_TTL_SECONDS`, default one day). |
-| `/`, `/health`, `/ui` | Open. They return no data. `/ui` itself sends signed-out users to the county sign-in when sign-in is on. |
+| `/`, `/health`, `/ui` | Open. They return no data: `/health` says only that the server is up, its build and whether chat is on. `/ui` itself sends signed-out users to the county sign-in when sign-in is on. |
 
 Points a reviewer usually asks about:
 
