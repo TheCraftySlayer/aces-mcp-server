@@ -1,19 +1,10 @@
-.git
-.venv
-venv
-__pycache__
-*.pyc
-.pytest_cache
-.ruff_cache
-.env
-*.xml
-start-aces.bat
-start-aces.ps1
-deploy.ps1
-examples/
-tests/
-sql/
-requirements-dev.txt
-pyproject.toml
-README.md
-sign_facts.py
+# Allowlist. deploy.ps1 builds the image from this folder (az acr build .), so anything
+# else sitting here, such as a .env file, a downloaded token, test output or a stray
+# download, must never reach the image. Only the files the server needs at run time
+# are let through. A new runtime module named aces_*.py is picked up automatically.
+*
+!server.py
+!aces_*.py
+!aces_facts.json
+!web_ui.html
+!requirements.txt
