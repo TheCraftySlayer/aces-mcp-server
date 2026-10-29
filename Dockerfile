@@ -20,8 +20,9 @@ ENV ACES_BUILD_TAG=$ACES_BUILD_TAG
 # .dockerignore is an allowlist, so this copies only the runtime files.
 COPY . .
 
-# Run as an unprivileged user. The server writes only its cache files
-# (TASK_CACHE_FILE and ACES_FILE_LINK_CACHE_FILE: /tmp by default, /home/... on Azure).
+# Run as an unprivileged user. The server writes only its cache files, its signing secret
+# and, if ACES_LOG_FILE is set, its log (TASK_CACHE_FILE, ACES_FILE_LINK_CACHE_FILE and
+# ACES_SERVER_SECRET_FILE: /tmp by default, /home/... on Azure).
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin aces
 USER aces
 

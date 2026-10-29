@@ -17,15 +17,37 @@ system.
 
 ```mermaid
 flowchart LR
-    staff[Staff browser /ui] -->|POST /chat| server
-    copilot[Copilot Studio agent] -->|MCP /mcp| server
-    pa[Power Automate flows] -->|REST, admin token| server
-    server[server.py] --> customgpt[CustomGPT specialist agents]
-    server --> arcgis[Public BernCo ArcGIS parcel layer]
-    server --> sql[(ACES database, ai_api procedures)]
-    server --> facts[aces_facts.json]
-    server -->|chat only| model[Azure OpenAI or Anthropic]
+    subgraph county["County network"]
+        staff["Staff browser /ui"]
+        server["A.C.E.S. server<br/>read-only"]
+        sql[("ACES database<br/>ai_api procedures")]
+        facts["aces_facts.json<br/>reviewed facts"]
+    end
+    entra["Microsoft Entra ID<br/>county sign-in"]
+    copilot["Copilot Studio agent"]
+    pa["Power Automate flows"]
+    customgpt["CustomGPT specialist agents"]
+    arcgis["Public BernCo ArcGIS parcel layer"]
+    model["Azure OpenAI or Anthropic"]
+
+    staff -->|signs in| entra
+    staff -->|POST /chat, signed-in session| server
+    copilot -->|MCP /mcp, access key| server
+    pa -->|REST, admin token| server
+    copilot -->|ACES_SQL tool, its own connection| sql
+    server -->|verifies sign-in| entra
+    server --> sql
+    server --> facts
+    server --> customgpt
+    server --> arcgis
+    server -->|chat only| model
 ```
+
+Everything inside the box runs on county systems. Every arrow that crosses its edge carries
+data to or from an outside service, and "What data goes where" below says what each one
+gets. The Copilot Studio agent's ACES_SQL tool reads the database on its own connection,
+not through this server, so the server's read-only guard doesn't cover it. On the Azure test
+deployment, the server and its copy of the database ran in Azure instead.
 
 | File | What it does |
 |---|---|
@@ -37,7 +59,7 @@ flowchart LR
 | `aces_arcgis.py` | The public BernCo ArcGIS parcel layer: lookups, map links, candidate peers and parcel context for specialist prompts. |
 | `aces_rest.py` | REST wrappers for Power Automate and the admin debug routes. |
 | `aces_common.py` | Small shared helpers: logging, time, hashing, text and JSON. |
-| `aces_keys.py` | The server's own secret, for signing chat tool results. Never leaves the server. |
+| `aces_keys.py` | The server's own secret, for signing chat tool results and sign-in sessions. Never leaves the server. |
 | `aces_sql_tools.py` | The 10 read-only ACES data tools. Each calls fixed stored procedures in the `ai_api` schema with bound parameters. |
 | `aces_chat.py` | `POST /chat`: the tool loop behind the staff chat page, for either Azure OpenAI or Anthropic. |
 | `aces_charts.py` | `Build_Chart`, a chat-only tool. It reads every chart value from a data tool result already in the conversation, never from the model. |
@@ -130,18 +152,26 @@ Points a reviewer usually asks about:
   a note that it was removed. Neither the model nor `Build_Chart` ever sees it as tool output.
   `tests/test_chat_signing.py` covers forged, edited and renamed results.
 - **SQL**: procedure names are constants and every input is a bound parameter. There's
-  no free-form SQL. On Azure the App Service managed identity can only EXECUTE the
-  `ai_api` schema. On the county server the server signs in as `ASR_CS_User`, which can
-  read and change every table, so there the read-only rule is enforced by the code:
-  the only statement sent is `EXEC ai_api.<fixed name>` with bound parameters
+  no free-form SQL: the only statement sent is `EXEC ai_api.<fixed name>`
   (`_run_proc_sync` in `aces_sql_tools.py`), and `tests/test_sql_read_only.py` runs
-  every data tool, including an injection attempt, and fails on anything else. Each
+  every data tool, including an injection attempt, and fails on anything else. The
+  database enforces read-only as well: on Azure the App Service managed identity can only
+  EXECUTE the `ai_api` schema, and on the county server the service account's login from
+  `sql/56_SERVICE_ACCOUNT_LOGIN.sql` is in `ai_api_executor` only. Until the DBA applies
+  `sql/56`, the county server and desk-PC runs sign in as `ASR_CS_User`, which can read and
+  change every table, so there read-only rests on the code and its test alone. Each
   procedure logs its own calls to `ai_api.tool_log`.
-- **Secrets** live only in app settings or, for local runs, in a DPAPI-encrypted file
-  under `%LOCALAPPDATA%\ACES`. Nothing secret is in the repo or its history.
+- **Secrets** live only in app settings on Azure; on a county server, in a DPAPI-encrypted
+  file under `C:\ProgramData\ACES\secrets` that only administrators and the service
+  account can read; and for desk-PC runs, in a DPAPI-encrypted file for your own Windows
+  account under `%LOCALAPPDATA%\ACES`. The server's signing secret is created on first
+  start and never leaves the server. Nothing secret is in the repo or its history.
 
 ## What data goes where
 
+- **Sign-in**: staff sign in to Microsoft Entra ID as they do for any county app. The
+  server gets back their sign-in name and, when the app registration sends them, their
+  group IDs. No password reaches the server.
 - **Chat**: staff questions and the tool results needed to answer them go to the
   configured model. With Azure OpenAI that's the county's own Azure tenant, sent with
   `store=false`. With Anthropic it's the Anthropic API. Prompts and answers aren't
@@ -181,7 +211,7 @@ docker run -p 8000:8000 -e ACES_MCP_API_KEY=... aces-mcp
 `aces_facts.json`, `web_ui.html`, `fonts/` and `requirements.txt`, and nothing else from the
 folder, so a stray `.env` or token file can't be built in. `tests/test_container.py`
 checks this. The server runs as an unprivileged `aces` user and writes only its two
-cache files.
+cache files, its signing secret and, when `ACES_LOG_FILE` is set, its log.
 
 ### On a county Windows server
 
@@ -265,13 +295,17 @@ python -m pip install -r requirements-dev.txt
 python -m pytest
 python -m ruff check .
 python -m ruff format --check .
+python -m pip_audit -r requirements.txt --no-deps --disable-pip
 ```
 
-The tests run the real app in-process with dummy settings and a scripted chat model, so
-they reach no network or database. They cover the tool list, access control on every
-route group, the chat page headers, input checks on the SQL tools, the facts rules, the
-chart builder and the chat tool loop. They don't make live calls to CustomGPT, ArcGIS
-or SQL. After a deploy, `deploy.ps1` checks that the new build is healthy and lists
+The tests run the real app in-process with dummy settings, a scripted chat model and a
+stand-in Entra ID, so they reach no network or database. They cover the tool list, access
+control on every route group, both kinds of county sign-in, signed chat tool results, the
+chat page's headers and fonts, input checks on the SQL tools, the facts and co-signing
+rules, the chart builder, the chat tool loop and the Copilot Studio instructions. They
+don't make live calls to CustomGPT, ArcGIS, Entra or SQL. The Tests workflow also runs
+the package audit on every push and every Monday, and keeps a package list (SBOM) with
+each run. After a deploy, `deploy.ps1` checks that the new build is healthy and lists
 every tool; live answers are checked by hand.
 
 ## Database changes
@@ -305,6 +339,10 @@ scripts are the changes applied, in order.
   database permissions.
 - **Reviewed facts aren't co-signed yet.** Every reviewed row is signed by one person. The
   co-signing is built; the topic owners haven't signed, and three rows are still open.
+- **Copilot Studio's ACES_SQL tool is outside this server.** The agent reads the ACES
+  database on its own connection, which reaches staff performance data and isn't covered
+  by the server's read-only guard. Which database account that connection uses hasn't
+  been confirmed.
 - **The Copilot Studio instructions are pasted by hand.** `copilot/agent-instructions.md` is
   checked by tests, but nothing confirms the agent has the current text.
 - **One maintainer.** A second person who can deploy, rotate keys and update the facts file
