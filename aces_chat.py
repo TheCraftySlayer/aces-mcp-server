@@ -56,7 +56,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastmcp import Client
@@ -124,7 +124,7 @@ class ChatError(Exception):
 def _today_text() -> str:
     try:
         return datetime.now(ZoneInfo("America/Denver")).strftime("%A, %B %d, %Y")
-    except Exception:  # no time zone data
+    except ZoneInfoNotFoundError:  # no time zone data
         pass
     return datetime.now(UTC).strftime("%A, %B %d, %Y")
 
@@ -373,7 +373,7 @@ async def _call_anthropic(messages: list[dict[str, Any]], tools: list[dict[str, 
         if response.status_code >= 400:
             try:
                 detail = response.json().get("error", {}).get("message", "")
-            except Exception:
+            except (ValueError, AttributeError):
                 detail = response.text[:300]
             message = f"The Anthropic API returned HTTP {response.status_code}. {detail}".strip()
             if "workspace" in detail.lower() and not ANTHROPIC_WORKSPACE_ID:
@@ -568,7 +568,7 @@ async def _call_azure_openai(messages: list[dict[str, Any]], tools: list[dict[st
         if response.status_code >= 400:
             try:
                 detail = response.json().get("error", {}).get("message", "")
-            except Exception:
+            except (ValueError, AttributeError):
                 detail = response.text[:300]
             message = f"Azure OpenAI returned HTTP {response.status_code}. {detail}".strip()
             if response.status_code in (401, 403) and not AZURE_OPENAI_API_KEY:
@@ -612,7 +612,7 @@ async def _run_tool(client: Client, block: dict[str, Any], emit, log, full_text:
         is_error = bool(result.is_error)
         if not text and not is_error:
             text = "The tool returned no text."
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  a failed tool becomes an error result the model can see
         text = f"The tool call failed: {exc.__class__.__name__}: {str(exc)[:300]}"
         is_error = True
     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -648,7 +648,7 @@ async def _run_chart_tool(block: dict[str, Any], sources: list[dict[str, Any]], 
     except aces_charts.ChartError as exc:
         summary = f"Chart not drawn: {exc}"
         content, spec, is_error = summary, None, True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  a chart bug must not end the conversation
         summary = f"Chart not drawn: the chart builder failed ({exc.__class__.__name__})."
         content, spec, is_error = summary, None, True
     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -787,7 +787,7 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
 
         try:
             body = await request.json()
-        except Exception:
+        except ValueError:
             body = {}
         try:
             history = _clean_history(body.get("messages") if isinstance(body, dict) else None)
@@ -813,7 +813,7 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
             except ChatError as exc:
                 chat_log("chat failed", error=str(exc)[:300])
                 await emit({"type": "error", "message": str(exc)})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001  the stream must end with an error the page can show
                 chat_log("chat failed unexpectedly", error=f"{exc.__class__.__name__}: {str(exc)[:300]}")
                 await emit(
                     {"type": "error", "message": "The chat failed on the server. Check the server log for details."}

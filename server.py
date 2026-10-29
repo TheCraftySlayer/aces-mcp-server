@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from html import escape as html_escape
 from typing import Any
 from urllib.parse import quote_plus
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # FastMCP reads these through settings/env for Streamable HTTP behavior.
 os.environ.setdefault("FASTMCP_STATELESS_HTTP", "true")
@@ -231,7 +231,7 @@ def _today_mountain_date():
     """Return today's date in America/Denver, falling back safely to UTC."""
     try:
         return datetime.now(ZoneInfo("America/Denver")).date()
-    except Exception:  # no time zone data (tzdata missing on Windows)
+    except ZoneInfoNotFoundError:  # no time zone data (tzdata missing on Windows)
         pass
     return datetime.now(UTC).date()
 
@@ -418,7 +418,7 @@ def _canonical_prompt_for_cache(tool_name: str, prompt_text: str) -> str:
 def _safe_json_dumps(value: Any, max_len: int = 3000) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False)
-    except Exception:
+    except (TypeError, ValueError):
         text = str(value)
     if len(text) > max_len:
         return text[:max_len] + "...[truncated]"
@@ -841,7 +841,7 @@ async def _request_json_or_empty(request) -> dict[str, Any]:
     try:
         data = await request.json()
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except ValueError:
         return {}
 
 
@@ -1185,7 +1185,7 @@ def _fmt_arcgis_number(value: Any) -> str:
         if number.is_integer():
             return f"{int(number):,}"
         return f"{number:,.4f}".rstrip("0").rstrip(".")
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return str(value)
 
 
@@ -1194,7 +1194,7 @@ def _fmt_arcgis_money(value: Any) -> str:
         return ""
     try:
         return f"${float(value):,.0f}"
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return str(value)
 
 
@@ -1364,7 +1364,7 @@ async def _arcgis_public_parcel_lookup_result(
 
     try:
         max_results_int = max(1, min(int(max_results), 25))
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         max_results_int = ARCGIS_PUBLIC_PARCEL_MAX_RESULTS
 
     candidates = _arcgis_where_candidates(search_text)
@@ -1399,7 +1399,7 @@ async def _arcgis_public_parcel_lookup_result(
                     f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers()
                 )
                 data = await _read_json_or_text(response)
-            except Exception as exc:
+            except httpx.HTTPError as exc:
                 last_error = str(exc)
                 continue
 
@@ -1467,7 +1467,7 @@ def _float_or_none(value: Any) -> float | None:
         if value is None or value == "":
             return None
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -1476,7 +1476,7 @@ def _arcgis_candidate_radius_values() -> list[float]:
     for raw in re.split(r"[,;\s]+", ARCGIS_CANDIDATE_PEER_RADIUS_MILES or ""):
         try:
             miles = float(raw)
-        except Exception:
+        except ValueError:
             continue
         if miles > 0:
             values.append(miles)
@@ -1659,7 +1659,7 @@ async def _arcgis_public_candidate_peers_result(
     """
     try:
         max_results_int = max(1, min(int(max_results), ARCGIS_CANDIDATE_PEER_MAX_RESULTS))
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         max_results_int = 10
 
     subject_lookup = await _arcgis_public_parcel_lookup_result(
@@ -1738,7 +1738,7 @@ async def _arcgis_public_candidate_peers_result(
                         f"{ARCGIS_PUBLIC_PARCEL_LAYER_URL}/query", data=params, headers=_arcgis_request_headers()
                     )
                     data = await _read_json_or_text(response)
-                except Exception as exc:
+                except httpx.HTTPError as exc:
                     last_error = str(exc)
                     continue
 
@@ -2104,7 +2104,7 @@ async def _enrich_homeharvest_prompt_with_arcgis(prompt_text: str) -> str:
             candidate_peers=bool(peer_block),
         )
         return text + "\n\n" + context_block + (("\n\n" + peer_block) if peer_block else "")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  the specialist still gets the question if the GIS pre-check fails
         _log("ArcGIS pre-check failed", error=str(exc))
         return (
             text
@@ -2287,7 +2287,7 @@ async def _enrich_report_generation_prompt_with_arcgis(
             candidate_peers=bool(peer_block),
         )
         return f"{context_block}{((chr(10) + chr(10) + peer_block) if peer_block else '')}\n\nSTAFF REQUEST:\n{text}"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  the specialist still gets the question if the GIS pre-check fails
         _log("ArcGIS report-generation pre-check failed", error=str(exc))
         extra = ""
         if include_homeharvest:
@@ -2624,7 +2624,7 @@ async def context_expert_file_download_route(request):
             timeout=httpx.Timeout(connect=15, read=60, write=30, pool=15), follow_redirects=False
         ) as client:
             response = await client.get(url, headers=headers)
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         _log(
             "context expert file download failed",
             error=str(exc),
@@ -2977,7 +2977,7 @@ async def start_lookup_route(request):
         )
         normalized = _normalize_aces_result(raw_result, project_id=ASSESSMENT_PROJECT_ID)
         return JSONResponse(normalized)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  Power Automate expects a JSON answer even when something unexpected fails
         _log("start_lookup_route exception", error=str(exc))
         return JSONResponse(
             {
@@ -3039,7 +3039,7 @@ async def check_pending_task_route(request):
         raw_result = await _check_customgpt_task_result(project_id=project_id, task_id=task_id)
         normalized = _normalize_aces_result(raw_result, project_id=project_id, task_id=task_id)
         return JSONResponse(normalized)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  Power Automate expects a JSON answer even when something unexpected fails
         _log("check_pending_task_route exception", project_id=project_id, task_id=task_id, error=str(exc))
         return JSONResponse(
             {
@@ -3100,7 +3100,7 @@ async def smart_task_route(request):
             response_source=SMART_TASKS_RESPONSE_SOURCE,
         )
         return JSONResponse(_normalize_aces_result(raw_result, project_id=project_id))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  Power Automate expects a JSON answer even when something unexpected fails
         _log("smart_task_route exception", project_id=project_id, error=str(exc))
         return JSONResponse(
             {
@@ -3165,7 +3165,7 @@ async def agent_call_route(request):
                     _format_arcgis_map_routing_text(result) if is_map else _format_arcgis_parcel_lookup_text(result)
                 )
                 extra = {"results": result.get("results", [])}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  Power Automate expects a JSON answer even when something unexpected fails
             _log("agent_call_route arcgis exception", agent=agent, error=str(exc))
             return JSONResponse(
                 {
@@ -3235,7 +3235,7 @@ async def agent_call_route(request):
             raw_result = await _call_customgpt_conversation(project_id, prompt_text, tool_name)
 
         return JSONResponse(_normalize_aces_result(raw_result, project_id=project_id))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  Power Automate expects a JSON answer even when something unexpected fails
         _log("agent_call_route exception", agent=agent, error=str(exc))
         return JSONResponse(
             {
@@ -3551,7 +3551,7 @@ async def _read_json_or_text(response: httpx.Response) -> Any:
     text = response.text or ""
     try:
         return response.json()
-    except Exception:
+    except ValueError:
         return {"raw": text}
 
 
@@ -3768,7 +3768,7 @@ async def _create_context_expert_artifact_links(
     try:
         response = await client.get(url, headers=headers)
         payload = await _read_json_or_text(response)
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         _log(
             "context expert files list failed",
             project_id=project_id,
@@ -4948,5 +4948,5 @@ if __name__ == "__main__":
         _log("WARNING: ACES_MCP_API_KEY is not set - /mcp will refuse all requests")
     port = int(os.getenv("PORT", "10000"))
     # HOST=127.0.0.1 keeps a local run reachable only from this PC. Containers need the 0.0.0.0 default.
-    host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
+    host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"  # noqa: S104  the container default; local runs set 127.0.0.1
     uvicorn.run(app, host=host, port=port)

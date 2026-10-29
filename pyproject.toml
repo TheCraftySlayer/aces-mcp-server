@@ -7,8 +7,15 @@ target-version = "py312"   # matches the Dockerfile (python:3.12)
 [tool.ruff.lint]
 # F: real errors (undefined names, unused imports)   E9: syntax errors
 # B: likely bugs                                      UP: modern syntax for 3.12
-# I: import order
-select = ["F", "E9", "B", "UP", "I"]
+# I: import order                                     S: security checks (bandit)
+# BLE: catching every exception. Each broad catch left in the code is a deliberate
+#      boundary (an outside call, or a route that must always answer in JSON) and is
+#      marked with a noqa comment that says why.
+select = ["F", "E9", "B", "UP", "I", "S", "BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use assert, and dummy tokens that look like passwords to the scanner.
+"tests/*" = ["S101", "S105", "S106"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["server", "aces_chat", "aces_charts", "aces_facts", "aces_sql_tools"]

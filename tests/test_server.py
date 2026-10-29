@@ -144,3 +144,13 @@ def test_sql_tools_check_input_before_touching_the_database(call_tool):
     text, is_error = call_tool("ACES_NOV_Parcel", upc="123 Main St")
     assert is_error
     assert "ACES_NOV_Search" in text
+
+
+def test_rest_routes_treat_a_body_that_isnt_json_as_empty(client):
+    response = client.post(
+        "/smart-task",
+        headers={"x-aces-admin-token": TEST_ADMIN_TOKEN, "Content-Type": "application/json"},
+        content=b"not json {",
+    )
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Missing promptText."
