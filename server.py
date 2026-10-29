@@ -2337,9 +2337,18 @@ async def root_route(request):
 # ACES_ALLOWED_USERS: optional comma-separated sign-in names (e.g. anewe@bernco.gov).
 # When set, only those accounts get in, even if Entra lets others sign in.
 
-ENTRA_SIGNIN_REQUESTED = os.getenv("ACES_ENTRA_SIGNIN", "").strip().lower() in {"1", "true", "yes", "on"}
-WEBSITE_AUTH_ENABLED = os.getenv("WEBSITE_AUTH_ENABLED", "").strip().lower() == "true"
-ENTRA_SIGNIN_ACTIVE = ENTRA_SIGNIN_REQUESTED and WEBSITE_AUTH_ENABLED
+
+def _entra_signin_requested(env: Any = os.environ) -> bool:
+    return str(env.get("ACES_ENTRA_SIGNIN", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _entra_signin_active(env: Any = os.environ) -> bool:
+    """Trust the sign-in headers only when we asked for sign-in AND App Service says it's on."""
+    return _entra_signin_requested(env) and str(env.get("WEBSITE_AUTH_ENABLED", "")).strip().lower() == "true"
+
+
+ENTRA_SIGNIN_REQUESTED = _entra_signin_requested()
+ENTRA_SIGNIN_ACTIVE = _entra_signin_active()
 ALLOWED_USERS = {u.strip().lower() for u in os.getenv("ACES_ALLOWED_USERS", "").split(",") if u.strip()}
 ENTRA_LOGIN_URL = "/.auth/login/aad?post_login_redirect_uri=/ui"
 ENTRA_LOGOUT_URL = "/.auth/logout?post_logout_redirect_uri=/ui"
@@ -2355,7 +2364,9 @@ def _principal_name(headers: dict[str, str]) -> str:
         return ""
     try:
         data = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
-    except Exception:
+    except ValueError:  # bad base64, bad UTF-8 or bad JSON
+        return ""
+    if not isinstance(data, dict):
         return ""
     claims: dict[str, str] = {}
     for claim in data.get("claims") or []:
