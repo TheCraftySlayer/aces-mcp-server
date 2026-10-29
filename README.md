@@ -95,6 +95,10 @@ Points a reviewer usually asks about:
   `frame-ancestors 'none'` and `no-store`. The local launcher passes the access key in
   the URL fragment, which never reaches the server. The page keeps it in that tab's
   sessionStorage and clears it from the address bar.
+- **CustomGPT IDs**: a caller-supplied project ID must be one of this server's own
+  specialist projects, and task IDs may hold only letters, digits, dashes and
+  underscores. Both go into CustomGPT URLs that carry the server's API token, so this
+  stops a value like `9262/../../12345` from reaching another project or API path.
 - **SQL**: procedure names are constants and every input is a bound parameter. There's
   no free-form SQL. The production login (the App Service managed identity) can only
   EXECUTE the `ai_api` schema, and each procedure logs its own calls to
