@@ -22,12 +22,12 @@ flowchart LR
         server["A.C.E.S. server<br/>read-only"]
         sql[("ACES database<br/>ai_api procedures")]
         facts["aces_facts.json<br/>reviewed facts"]
+        arcgis["Assessor parcel map<br/>assessormap.bernco.gov"]
     end
     entra["Microsoft Entra ID<br/>county sign-in"]
     copilot["Copilot Studio agent"]
     pa["Power Automate flows"]
-    customgpt["CustomGPT specialist agents"]
-    arcgis["Public BernCo ArcGIS parcel layer"]
+    customgpt["CustomGPT specialist agents<br/>under contract with the office"]
     model["Azure OpenAI or Anthropic"]
 
     staff -->|signs in| entra
@@ -39,7 +39,7 @@ flowchart LR
     server --> sql
     server --> facts
     server --> customgpt
-    server --> arcgis
+    server -->|parcel lookups| arcgis
     server -->|chat only| model
 ```
 
@@ -177,8 +177,11 @@ Points a reviewer usually asks about:
   `store=false`. With Anthropic it's the Anthropic API. Prompts and answers aren't
   written to the server log. The log gets tool names, timings, token counts, the length
   and a hash of each specialist question and, with sign-in on, the user's sign-in name.
-- **Specialist tools**: the question goes to CustomGPT for that agent's project.
-- **ArcGIS tools**: queries go to the county's public parcel layer.
+- **Specialist tools**: the question goes to CustomGPT for that agent's project. CustomGPT
+  works under a contract with the Assessor's Office.
+- **ArcGIS tools**: queries go to the Assessor's own public parcel map server
+  (`assessormap.bernco.gov`, run by the Assessor GIS Department), so they stay on county
+  systems.
 - **Task cache** (`TASK_CACHE_FILE`): task IDs, hashes of prompts (not the text) and
   the specialists' answers, so a repeated question doesn't start a second CustomGPT task.
   An answer is reused for `ACES_ANSWER_CACHE_HOURS` (default 24) and then asked fresh,
