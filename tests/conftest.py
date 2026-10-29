@@ -22,6 +22,7 @@ os.environ.update(
         "ACES_BUILD_TAG": "pytest",
         "ACES_MCP_API_KEY": TEST_KEY,
         "ACES_ADMIN_TOKEN": TEST_ADMIN_TOKEN,
+        "ACES_SERVER_SECRET": "test-server-secret-not-a-real-one-0123456789",
         "ACES_ENTRA_SIGNIN": "false",
         "ACES_SQL_TOOLS_ENABLED": "true",
         "ACES_SQL_SERVER": "sql.invalid",

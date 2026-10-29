@@ -36,6 +36,7 @@ flowchart LR
 | `aces_arcgis.py` | The public BernCo ArcGIS parcel layer: lookups, map links, candidate peers and parcel context for specialist prompts. |
 | `aces_rest.py` | REST wrappers for Power Automate and the admin debug routes. |
 | `aces_common.py` | Small shared helpers: logging, time, hashing, text and JSON. |
+| `aces_keys.py` | The server's own secret, for signing chat tool results. Never leaves the server. |
 | `aces_sql_tools.py` | The 10 read-only ACES data tools. Each calls fixed stored procedures in the `ai_api` schema with bound parameters. |
 | `aces_chat.py` | `POST /chat`: the tool loop behind the staff chat page, for either Azure OpenAI or Anthropic. |
 | `aces_charts.py` | `Build_Chart`, a chat-only tool. It reads every chart value from a data tool result already in the conversation, never from the model. |
@@ -105,6 +106,13 @@ Points a reviewer usually asks about:
   specialist projects, and task IDs may hold only letters, digits, dashes and
   underscores. Both go into CustomGPT URLs that carry the server's API token, so this
   stops a value like `9262/../../12345` from reaching another project or API path.
+- **Chat tool results are signed.** The chat page keeps the conversation and sends it back
+  with each question, so it could carry a tool result the server never produced, such as a
+  made-up ACES figure or a fake reviewed fact. Every tool result the server returns is signed
+  (HMAC-SHA256 over the tool call and its result) with a secret only the server holds
+  (`aces_keys.py`), and any result that comes back without a valid signature is replaced with
+  a note that it was removed. Neither the model nor `Build_Chart` ever sees it as tool output.
+  `tests/test_chat_signing.py` covers forged, edited and renamed results.
 - **SQL**: procedure names are constants and every input is a bound parameter. There's
   no free-form SQL. On Azure the App Service managed identity can only EXECUTE the
   `ai_api` schema. On the county server the server signs in as `ASR_CS_User`, which can
@@ -182,6 +190,7 @@ All settings are environment variables. Only the first group is needed to start.
 | `ACES_SQL_TOOLS_ENABLED`, `ACES_SQL_SERVER`, `ACES_SQL_DATABASE`, `ACES_SQL_AUTH`, `ACES_SQL_USER`, `ACES_SQL_PASSWORD`, `ACES_SQL_TRUST_SERVER_CERT` | ACES database connection. The options are explained at the top of `aces_sql_tools.py`. |
 | `ACES_CHAT_PROVIDER`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `ANTHROPIC_API_KEY`, `ACES_ANTHROPIC_WORKSPACE_ID` | Chat model. The options are explained at the top of `aces_chat.py`. |
 | `ACES_PUBLIC_BASE_URL` | This server's public address, for CustomGPT file download links. On App Service it defaults to the app's host name; with neither, file links are skipped. |
+| `ACES_SERVER_SECRET_FILE` | Where the server keeps its signing secret (created on first start). Default: the system temp folder. On App Service use `/home/aces_server_secret.key`, and on a county server a folder only the service account can read, so signatures survive restarts. `ACES_SERVER_SECRET` sets the secret directly instead. |
 | `TASK_CACHE_FILE` | Default: `aces_task_cache.json` in the system temp folder (`/tmp` in the container, `%TEMP%` on Windows). On App Service, point it at `/home/...` so it survives restarts. |
 | `ACES_ANSWER_CACHE_HOURS` | Default 24. How long a finished specialist answer is reused for the same question. `0` turns reuse off; use that for evaluation runs so every question reaches the specialist. |
 | `ACES_TASK_CACHE_KEEP_DAYS` | Default 7. Cache entries untouched this long are dropped when the cache is saved. |
