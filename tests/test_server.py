@@ -193,3 +193,16 @@ def test_fonts_are_served_and_nothing_else_is(client):
         assert response.content[:4] == b"wOF2", name
     for name in ("OFL-PublicSans.txt", "..%2Fserver.py", "server.py", "missing.woff2"):
         assert client.get(f"/fonts/{name}").status_code == 404, name
+
+
+def test_log_lines_also_go_to_the_log_file(tmp_path, monkeypatch):
+    import aces_common
+
+    path = tmp_path / "logs" / "aces.log"
+    monkeypatch.setattr(aces_common, "_FILE_LOG", aces_common._file_logger(str(path), 3))
+    aces_common._log("chat answered", user="anewe@bernco.gov", ms=12, skipped=None)
+    for handler in aces_common._FILE_LOG.handlers:
+        handler.flush()
+    text = path.read_text(encoding="utf-8")
+    assert "[aces] chat answered user=anewe@bernco.gov ms=12" in text
+    assert "skipped" not in text

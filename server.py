@@ -13,15 +13,17 @@ from fastmcp.exceptions import ToolError
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
+import aces_access
 import aces_chat
 import aces_facts
+import aces_oidc
 import aces_rest
 import aces_sql_tools
 from aces_access import (
     ACES_ADMIN_TOKEN,
     ACES_MCP_API_KEY,
+    ALLOWED_GROUPS,
     ALLOWED_USERS,
-    ENTRA_LOGIN_URL,
     ENTRA_SIGNIN_ACTIVE,
     ENTRA_SIGNIN_REQUESTED,
     McpApiKeyMiddleware,
@@ -145,10 +147,10 @@ WEB_UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui.h
 @mcp.custom_route("/ui", methods=["GET"])
 async def web_ui_route(request):
     user = ""
-    if ENTRA_SIGNIN_ACTIVE:
+    if aces_access.signin_active():
         user, allowed = _signed_in_user({k.lower(): v for k, v in request.headers.items()})
         if not user:
-            return RedirectResponse(ENTRA_LOGIN_URL, status_code=302)
+            return RedirectResponse(aces_access.login_url(), status_code=302)
         if not allowed:
             _log("UI blocked - signed-in user not on the access list", user=user)
             return _not_on_list_page(user)
@@ -163,6 +165,8 @@ async def web_ui_route(request):
     nonce = secrets.token_urlsafe(16)
     html = html.replace("__CSP_NONCE__", nonce)
     html = html.replace("__ACES_USER__", html_escape(user, quote=True))
+    html = html.replace("__ACES_LOGIN_URL__", html_escape(aces_access.login_url(), quote=True))
+    html = html.replace("__ACES_LOGOUT_URL__", html_escape(aces_access.logout_url(), quote=True))
     csp = (
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}'; "
@@ -293,7 +297,10 @@ async def health_details(request):
             "chat_provider": aces_chat.CHAT_PROVIDER,
             "entra_signin_requested": ENTRA_SIGNIN_REQUESTED,
             "entra_signin_active": ENTRA_SIGNIN_ACTIVE,
+            "server_signin_active": aces_oidc.ACTIVE,
+            "server_signin_configured": aces_oidc.CONFIGURED,
             "allowed_users_count": len(ALLOWED_USERS),
+            "allowed_groups_count": len(ALLOWED_GROUPS),
             "chat_model": aces_chat.CHAT_MODEL if aces_chat.CHAT_ENABLED else "",
             "chat_workspace_set": bool(aces_chat.ANTHROPIC_WORKSPACE_ID),
             # Read from the server itself, so this list can't drift from what callers see.
@@ -599,6 +606,9 @@ aces_sql_tools.register_sql_tools(
 # Power Automate REST wrappers and admin debug routes (aces_rest.py).
 aces_rest.register(mcp)
 
+# County sign-in run by this server (/auth/*), for a county server without App Service. Off unless configured.
+aces_access.register_signin(mcp)
+
 # One-conversation chat over these tools (Azure OpenAI or the Anthropic API; see aces_chat.py). Off until a provider is configured.
 aces_chat.register_chat(mcp, log=_log)
 
@@ -615,4 +625,18 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     # HOST=127.0.0.1 keeps a local run reachable only from this PC. Containers need the 0.0.0.0 default.
     host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"  # noqa: S104  the container default; local runs set 127.0.0.1
-    uvicorn.run(app, host=host, port=port)
+    # HTTPS straight from this process, for a county server with nothing in front of it.
+    # PEM files; see docs/OPERATIONS.md for getting them out of a county certificate.
+    tls_cert = os.getenv("ACES_TLS_CERT_FILE", "").strip()
+    tls_key = os.getenv("ACES_TLS_KEY_FILE", "").strip()
+    tls = {}
+    if tls_cert or tls_key:
+        if not (tls_cert and tls_key):
+            raise SystemExit("Set both ACES_TLS_CERT_FILE and ACES_TLS_KEY_FILE, or neither.")
+        tls = {"ssl_certfile": tls_cert, "ssl_keyfile": tls_key}
+        if os.getenv("ACES_TLS_KEY_PASSWORD"):
+            tls["ssl_keyfile_password"] = os.getenv("ACES_TLS_KEY_PASSWORD")
+        _log("serving HTTPS", cert=tls_cert)
+    if aces_oidc.ACTIVE:
+        _log("county sign-in by this server", redirect_uri=aces_oidc.REDIRECT_URI)
+    uvicorn.run(app, host=host, port=port, **tls)
