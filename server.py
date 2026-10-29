@@ -166,8 +166,8 @@ async def web_ui_route(request):
     csp = (
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}'; "
-        f"style-src 'nonce-{nonce}' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; "
+        f"style-src 'nonce-{nonce}'; "
+        "font-src 'self'; "
         "connect-src 'self'; "
         "img-src 'self' data:; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -181,6 +181,39 @@ async def web_ui_route(request):
             "Referrer-Policy": "no-referrer",
             "Cache-Control": "no-store",
         },
+    )
+
+
+# The chat page's two typefaces, served from fonts/ (SIL Open Font License; the license
+# files are in the same folder) so the page loads nothing from outside sites. Only these
+# names are served; nothing from the request is ever joined onto a path.
+FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+FONT_FILES = frozenset(
+    {
+        "public-sans-latin.woff2",
+        "public-sans-latin-ext.woff2",
+        "ibm-plex-mono-400-latin.woff2",
+        "ibm-plex-mono-400-latin-ext.woff2",
+        "ibm-plex-mono-500-latin.woff2",
+        "ibm-plex-mono-500-latin-ext.woff2",
+    }
+)
+
+
+@mcp.custom_route("/fonts/{name}", methods=["GET"])
+async def font_route(request):
+    name = request.path_params.get("name", "")
+    if name not in FONT_FILES:
+        return JSONResponse({"error": "Not found."}, status_code=404)
+    try:
+        with open(os.path.join(FONTS_DIR, name), "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return JSONResponse({"error": "Not found."}, status_code=404)
+    return Response(
+        content=data,
+        media_type="font/woff2",
+        headers={"Cache-Control": "public, max-age=2592000", "X-Content-Type-Options": "nosniff"},
     )
 
 

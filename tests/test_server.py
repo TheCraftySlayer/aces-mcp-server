@@ -173,3 +173,23 @@ def test_every_rest_route_except_file_links_needs_the_admin_token(client):
         assert client.request(method, path).status_code == 401, path
     # A download link's random token is its credential; an unknown one finds nothing.
     assert client.get("/context-expert-file/not-a-real-token").status_code == 404
+
+
+def test_ui_page_loads_nothing_from_outside_sites(client):
+    response = client.get("/ui")
+    csp = response.headers["content-security-policy"]
+    assert "font-src 'self'" in csp
+    assert "googleapis" not in csp and "gstatic" not in csp
+    assert "https://" not in response.text.split("<script", 1)[0], "no outside stylesheet or font in the page head"
+
+
+def test_fonts_are_served_and_nothing_else_is(client):
+    import server
+
+    for name in server.FONT_FILES:
+        response = client.get(f"/fonts/{name}")
+        assert response.status_code == 200, name
+        assert response.headers["content-type"] == "font/woff2"
+        assert response.content[:4] == b"wOF2", name
+    for name in ("OFL-PublicSans.txt", "..%2Fserver.py", "server.py", "missing.woff2"):
+        assert client.get(f"/fonts/{name}").status_code == 404, name

@@ -57,7 +57,10 @@ def _runtime_modules() -> set[str]:
 
 
 def test_image_gets_every_runtime_file():
-    needed = _runtime_modules() | {"aces_facts.json", "web_ui.html", "requirements.txt"}
+    import server
+
+    fonts = {f"fonts/{name}" for name in server.FONT_FILES} | {"fonts/OFL-PublicSans.txt", "fonts/OFL-IBMPlexMono.txt"}
+    needed = _runtime_modules() | {"aces_facts.json", "web_ui.html", "requirements.txt"} | fonts
     missing = sorted(f for f in needed if not _in_image(f))
     assert not missing, f"left out of the image: {missing}"
 
