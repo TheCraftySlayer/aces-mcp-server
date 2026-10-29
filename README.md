@@ -29,7 +29,13 @@ flowchart LR
 
 | File | What it does |
 |---|---|
-| `server.py` | The app: settings, access control, the CustomGPT specialist tools, the ArcGIS parcel tools, the UPC route link, REST wrappers for Power Automate, and admin debug routes. |
+| `server.py` | The app: the MCP tool definitions, the chat page, `/health`, and wiring the modules below together. |
+| `aces_access.py` | Who may call what: the access key for `/mcp` and `/chat`, county sign-in, and the admin token. |
+| `aces_customgpt.py` | The CustomGPT specialists: settings, the task cache, submitting and polling tasks, and download links for generated files. |
+| `aces_routing.py` | Reads a staff prompt to decide what extra work it needs (HomeHarvest, a report, a map, an ArcGIS-only lookup). |
+| `aces_arcgis.py` | The public BernCo ArcGIS parcel layer: lookups, map links, candidate peers and parcel context for specialist prompts. |
+| `aces_rest.py` | REST wrappers for Power Automate and the admin debug routes. |
+| `aces_common.py` | Small shared helpers: logging, time, hashing, text and JSON. |
 | `aces_sql_tools.py` | The 10 read-only ACES data tools. Each calls fixed stored procedures in the `ai_api` schema with bound parameters. |
 | `aces_chat.py` | `POST /chat`: the tool loop behind the staff chat page, for either Azure OpenAI or Anthropic. |
 | `aces_charts.py` | `Build_Chart`, a chat-only tool. It reads every chart value from a data tool result already in the conversation, never from the model. |
@@ -179,7 +185,8 @@ All settings are environment variables. Only the first group is needed to start.
 | `UPC_ROUTER_URL` | Address of the field route planner. |
 
 Less common settings (poll intervals, task time limits, ArcGIS search sizes, HomeHarvest
-behavior) are listed with their defaults near the top of `server.py`.
+behavior) are listed with their defaults near the top of `aces_customgpt.py` and
+`aces_arcgis.py`.
 
 ## Reviewed facts
 
@@ -225,9 +232,13 @@ and 56 set up the limited login. `sql/README.md` explains each file.
 
 ## Known gaps
 
-- **`server.py` is about 4,500 lines.** The plan is to split it by area (CustomGPT
-  client, ArcGIS, REST wrappers, access control) once there are tests around the live
-  CustomGPT and ArcGIS paths, so the split can be checked against real behavior.
+- **Live paths aren't covered by tests.** Access control is at 92% and `server.py` at
+  75%, but the CustomGPT task path (26%), ArcGIS (16%) and the SQL tools (25%) need live
+  services, so they're checked by hand after a deploy. Overall coverage is 46%.
+- **Moved names kept their underscores.** Splitting `server.py` moved code without
+  changing it, so functions other modules now import (such as `_log` and
+  `_require_rest_auth`) still have a leading underscore. Renaming them is a separate,
+  mechanical change.
 - **The on-prem login.** `sql/55` and `sql/56` create `ACES_MCP_Reader`, which can
   only EXECUTE the `ai_api` procedures, and check that's all it can do. The DBA runs 55
   (it creates a server login); 56 runs in the database. Until then, `start-aces.bat`

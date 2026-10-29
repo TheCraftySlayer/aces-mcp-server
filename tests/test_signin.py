@@ -10,6 +10,7 @@ import json
 import pytest
 from conftest import MCP_HEADERS, TEST_KEY
 
+import aces_access
 import server
 
 LIST_TOOLS = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
@@ -17,8 +18,11 @@ LIST_TOOLS = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
 
 @pytest.fixture
 def signin_on(monkeypatch):
+    # The setting is read once at start-up. aces_access uses it for /mcp and /chat, and
+    # server.py's /ui route has its own copy from the import, so both are switched on.
+    monkeypatch.setattr(aces_access, "ENTRA_SIGNIN_ACTIVE", True)
+    monkeypatch.setattr(aces_access, "ALLOWED_USERS", {"anewe@bernco.gov"})
     monkeypatch.setattr(server, "ENTRA_SIGNIN_ACTIVE", True)
-    monkeypatch.setattr(server, "ALLOWED_USERS", {"anewe@bernco.gov"})
 
 
 def _as(user: str) -> dict[str, str]:
@@ -26,12 +30,12 @@ def _as(user: str) -> dict[str, str]:
 
 
 def test_headers_are_trusted_only_when_app_service_auth_is_on():
-    assert server._entra_signin_active({"ACES_ENTRA_SIGNIN": "true", "WEBSITE_AUTH_ENABLED": "True"})
+    assert aces_access._entra_signin_active({"ACES_ENTRA_SIGNIN": "true", "WEBSITE_AUTH_ENABLED": "True"})
     # Asked for, but App Service authentication is off: a client could send the headers itself.
-    assert not server._entra_signin_active({"ACES_ENTRA_SIGNIN": "true"})
-    assert not server._entra_signin_active({"ACES_ENTRA_SIGNIN": "true", "WEBSITE_AUTH_ENABLED": "false"})
+    assert not aces_access._entra_signin_active({"ACES_ENTRA_SIGNIN": "true"})
+    assert not aces_access._entra_signin_active({"ACES_ENTRA_SIGNIN": "true", "WEBSITE_AUTH_ENABLED": "false"})
     # App Service authentication is on, but this server wasn't told to use it.
-    assert not server._entra_signin_active({"WEBSITE_AUTH_ENABLED": "True"})
+    assert not aces_access._entra_signin_active({"WEBSITE_AUTH_ENABLED": "True"})
 
 
 def test_forged_headers_are_ignored_when_signin_is_off(client):
@@ -77,7 +81,7 @@ def test_principal_claims_are_read_and_bad_ones_ignored():
         return base64.b64encode(json.dumps(value).encode()).decode()
 
     claims = {"claims": [{"typ": "preferred_username", "val": "anewe@bernco.gov"}]}
-    assert server._principal_name({"x-ms-client-principal": encoded(claims)}) == "anewe@bernco.gov"
-    assert server._principal_name({"x-ms-client-principal": "not base64!"}) == ""
-    assert server._principal_name({"x-ms-client-principal": encoded(["a list", "not a dict"])}) == ""
-    assert server._principal_name({}) == ""
+    assert aces_access._principal_name({"x-ms-client-principal": encoded(claims)}) == "anewe@bernco.gov"
+    assert aces_access._principal_name({"x-ms-client-principal": "not base64!"}) == ""
+    assert aces_access._principal_name({"x-ms-client-principal": encoded(["a list", "not a dict"])}) == ""
+    assert aces_access._principal_name({}) == ""

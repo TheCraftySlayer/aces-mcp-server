@@ -18,7 +18,19 @@ select = ["F", "E9", "B", "UP", "I", "S", "BLE"]
 "tests/*" = ["S101", "S105", "S106"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["server", "aces_chat", "aces_charts", "aces_facts", "aces_sql_tools"]
+known-first-party = [
+    "server",
+    "aces_access",
+    "aces_arcgis",
+    "aces_chat",
+    "aces_charts",
+    "aces_common",
+    "aces_customgpt",
+    "aces_facts",
+    "aces_rest",
+    "aces_routing",
+    "aces_sql_tools",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
