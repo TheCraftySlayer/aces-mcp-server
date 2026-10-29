@@ -47,6 +47,7 @@ flowchart LR
 | `fonts/` | The chat page's two typefaces (Public Sans, IBM Plex Mono) and their SIL Open Font License files, served by the server so the page calls no outside site. |
 | `start-aces.bat`, `start-aces.ps1` | Starts the server on a Windows PC and opens the chat. |
 | `deploy.ps1` | Builds and deploys the container to Azure App Service, with checks and automatic rollback. |
+| `windows-service/` | Runs the server on a county Windows server as a service account: `install-aces-service.ps1` sets it up, `run-aces-service.ps1` is what the scheduled task runs, `service-settings.example.env` is the settings template. See `docs/OPERATIONS.md`. |
 | `Dockerfile` | Container image: Python 3.12 plus Microsoft ODBC Driver 18. |
 | `sql/` | The `ai_api` schema snapshot, the export script, and the numbered changes in the order they were applied. See `sql/README.md`. |
 | `tests/` | Tests that run without any network or database. |
@@ -179,6 +180,16 @@ docker run -p 8000:8000 -e ACES_MCP_API_KEY=... aces-mcp
 folder, so a stray `.env` or token file can't be built in. `tests/test_container.py`
 checks this. The server runs as an unprivileged `aces` user and writes only its two
 cache files.
+
+### On a county Windows server
+
+`windows-service\install-aces-service.ps1 -ServiceAccount "DOMAIN\svc-aces$"` in an
+administrator PowerShell window. It builds the Python environment, keeps the settings in
+`C:\ProgramData\ACES\service-settings.env` and the secrets encrypted beside them, and
+registers an "A.C.E.S. Server" task that starts at boot as the service account and restarts
+the server if it stops. The server serves HTTPS itself, signs staff in with Entra ID and signs
+in to SQL Server as the service account. `docs/OPERATIONS.md` has the full procedure,
+including what to ask the DBA and ISG for first.
 
 ### Deploying to Azure App Service
 
