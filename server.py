@@ -10,11 +10,7 @@ from datetime import UTC, datetime
 from html import escape as html_escape
 from typing import Any
 from urllib.parse import quote_plus
-
-try:
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover - Python < 3.9 fallback
-    ZoneInfo = None
+from zoneinfo import ZoneInfo
 
 # FastMCP reads these through settings/env for Streamable HTTP behavior.
 os.environ.setdefault("FASTMCP_STATELESS_HTTP", "true")
@@ -46,10 +42,10 @@ mcp = FastMCP(
     "A.C.E.S. Specialist Tools",
     instructions=(
         "Internal Bernalillo County Assessor staff MCP server. "
-        "Exposes ten tools: Community_Educator, Assessment_Context_Expert, "
+        "Exposes these tools: Community_Educator, Assessment_Context_Expert, "
         "Clear_Expectations, Compliance_Expert, Smart_Tasks, Check_CustomGPT_Task, "
         "ArcGIS_Public_Parcel_Lookup, ArcGIS_Public_Parcel_Map, ArcGIS_Public_Candidate_Peers, "
-        "and UPC_Router_Link. "
+        "UPC_Router_Link and ACES_Key_Facts. "
         "The five CustomGPT specialist tools take exactly one promptText string and return plain text. "
         "Community_Educator uses CustomGPT Plan & Act task mode because project 9262 has Plan & Act enabled. "
         "Smart_Tasks submits to CustomGPT project 9262 using Plan & Act task mode for Smart Tasks, code, file, dashboard, and multi-step work. "
@@ -58,7 +54,8 @@ mcp = FastMCP(
         "ArcGIS_Public_Parcel_Map returns BernCo Assessor map links and Google Maps routing links. "
         "ArcGIS_Public_Candidate_Peers returns ArcGIS-only candidate parcel peers for comp triage when living area/sale data is unavailable in GIS. "
         "UPC_Router_Link takes a list of UPCs and returns a link that opens the field route planner with them filled in. "
-        "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context."
+        "Assessment_Context_Expert can pre-enrich HomeHarvest/address/comps requests with ArcGIS parcel context. "
+        "ACES_Key_Facts returns staff-reviewed figures, deadlines and citations from a reviewed file."
     )
     + _SQL_TOOLS_NOTE,
 )
@@ -69,7 +66,7 @@ aces_facts.register(mcp)
 
 CUSTOMGPT_API_TOKEN = os.getenv("CUSTOMGPT_API_TOKEN", "").strip()
 
-# Set these in Render Environment.
+# Set these in the app settings (or the launcher, for local runs).
 COMMUNITY_PROJECT_ID = os.getenv("COMMUNITY_PROJECT_ID", "").strip()
 ASSESSMENT_PROJECT_ID = os.getenv("ASSESSMENT_PROJECT_ID", "94006").strip()
 CLEAR_PROJECT_ID = os.getenv("CLEAR_PROJECT_ID", "").strip()
@@ -98,7 +95,7 @@ HOMEHARVEST_ACTION_ID = os.getenv("HOMEHARVEST_ACTION_ID", "7").strip()
 
 # Public Bernalillo County Assessor parcel layer.
 # Default is the richer BernCo public MapServer layer. You can override this
-# with ARCGIS_PUBLIC_PARCEL_LAYER_URL in Render if GIS publishes a new URL.
+# with ARCGIS_PUBLIC_PARCEL_LAYER_URL if GIS publishes a new URL.
 ARCGIS_PUBLIC_PARCEL_LAYER_URL = os.getenv(
     "ARCGIS_PUBLIC_PARCEL_LAYER_URL",
     "https://assessormap.bernco.gov/server/rest/services/GIS/Assessor_Parcels_Public/MapServer/0",
@@ -149,25 +146,27 @@ ACES_MCP_API_KEY = os.getenv("ACES_MCP_API_KEY", "").strip()
 
 CUSTOMGPT_BASE = os.getenv("CUSTOMGPT_BASE", "https://app.customgpt.ai/api/v1").rstrip("/")
 
-# Render filesystem is ephemeral. This cache survives while the instance is alive,
-# but may reset after redeploy/cold start. Always return Task ID + Project ID for
-# unfinished tasks so Check_CustomGPT_Task can poll CustomGPT directly.
+# The default /tmp location doesn't survive a container restart (on Azure, point this at
+# /home/... to keep it). Always return Task ID + Project ID for unfinished tasks so
+# Check_CustomGPT_Task can poll CustomGPT directly even after the cache resets.
 TASK_CACHE_FILE = os.getenv("TASK_CACHE_FILE", "/tmp/aces_task_cache.json")
 
 # Generated Context Expert / CustomGPT artifact links.
-# Set ACES_PUBLIC_BASE_URL to your Render public URL, for example:
-#   https://aces-mcp-server.onrender.com
-# The server returns staff-safe download links that proxy through Render without
-# exposing the CustomGPT API token to Copilot/Teams users.
+# The server returns staff-safe download links that proxy through this server without
+# exposing the CustomGPT API token to Copilot/Teams users. The links need this server's
+# public address: ACES_PUBLIC_BASE_URL if set, otherwise the App Service host name
+# (WEBSITE_HOSTNAME, set by Azure). With neither, file links are skipped.
 CONTEXT_EXPERT_FILE_LINKS_ENABLED = os.getenv("ACES_CONTEXT_EXPERT_FILE_LINKS_ENABLED", "true").strip().lower() not in {
     "0",
     "false",
     "no",
     "off",
 }
-PUBLIC_BASE_URL = os.getenv(
-    "ACES_PUBLIC_BASE_URL",
-    os.getenv("PUBLIC_BASE_URL", "https://aces-mcp-server.onrender.com"),
+_WEBSITE_HOSTNAME = os.getenv("WEBSITE_HOSTNAME", "").strip()
+PUBLIC_BASE_URL = (
+    os.getenv("ACES_PUBLIC_BASE_URL", "").strip()
+    or os.getenv("PUBLIC_BASE_URL", "").strip()
+    or (f"https://{_WEBSITE_HOSTNAME}" if _WEBSITE_HOSTNAME else "")
 ).rstrip("/")
 FILE_LINK_CACHE_FILE = os.getenv("ACES_FILE_LINK_CACHE_FILE", "/tmp/aces_file_link_cache.json")
 FILE_LINK_TTL_SECONDS = int(os.getenv("ACES_FILE_LINK_TTL_SECONDS", "86400"))
@@ -219,9 +218,8 @@ def _now_iso() -> str:
 def _today_mountain_date():
     """Return today's date in America/Denver, falling back safely to UTC."""
     try:
-        if ZoneInfo is not None:
-            return datetime.now(ZoneInfo("America/Denver")).date()
-    except Exception:
+        return datetime.now(ZoneInfo("America/Denver")).date()
+    except Exception:  # no time zone data (tzdata missing on Windows)
         pass
     return datetime.now(UTC).date()
 
@@ -257,7 +255,7 @@ def _stable_hash(text: str) -> str:
 
 
 def _log(message: str, **kwargs: Any) -> None:
-    """Small structured-ish logger for Render stdout."""
+    """One-line key=value log to stdout (App Service and the local server window both show it)."""
     details = " ".join(f"{key}={value}" for key, value in kwargs.items() if value is not None)
     print(f"[aces] {message}" + (f" {details}" if details else ""), flush=True)
 
@@ -798,7 +796,7 @@ def _json_unauthorized(message: str = "Unauthorized. Supply the x-aces-admin-tok
 
 
 def _json_not_configured(
-    message: str = "Set ACES_ADMIN_TOKEN in Render to enable REST wrapper routes.",
+    message: str = "Set ACES_ADMIN_TOKEN in the app settings to enable REST wrapper routes.",
 ) -> JSONResponse:
     return JSONResponse(
         {
@@ -821,6 +819,18 @@ def _require_rest_auth(request) -> JSONResponse | None:
         return _json_not_configured()
     if not _admin_authorized(request):
         return _json_unauthorized()
+    return None
+
+
+def _require_admin_debug_auth(request) -> JSONResponse | None:
+    """Gate for the admin-only debug routes (task cache, check-task). None means go ahead."""
+    if not ACES_ADMIN_TOKEN:
+        return JSONResponse(
+            {"enabled": False, "message": "Set ACES_ADMIN_TOKEN in the app settings to enable this debug route."},
+            status_code=403,
+        )
+    if not _admin_authorized(request):
+        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
     return None
 
 
@@ -2330,9 +2340,10 @@ def _not_on_list_page(user: str) -> Response:
     )
 
 
-# Browser console for the MCP tools. The page itself holds no secrets. With county
-# sign-in on, the browser's sign-in session authorizes /mcp and /chat. Without it,
-# the page asks for the MCP access key and keeps it in that browser tab only.
+# Staff chat page (/ui). The page itself holds no secrets. With county sign-in on, the
+# browser's sign-in session authorizes /chat. Without it, the page asks for the MCP
+# access key (the local launcher passes it in the URL fragment) and keeps it in that
+# browser tab only.
 WEB_UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui.html")
 
 
@@ -2453,24 +2464,17 @@ async def health_check(request):
 
 @mcp.custom_route("/task-cache", methods=["GET"])
 async def task_cache_debug(request):
-    if not ACES_ADMIN_TOKEN:
-        return JSONResponse(
-            {"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403
-        )
-    if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
+    """Admin-only view of the task cache: task IDs, prompt hashes and cached specialist answers."""
+    if (denied := _require_admin_debug_auth(request)) is not None:
+        return denied
     return JSONResponse({"count": len(TASK_CACHE), "tasks": TASK_CACHE})
 
 
 @mcp.custom_route("/task-cache/clear", methods=["POST"])
 async def task_cache_clear(request):
-    """Admin-only route to clear the local Render task cache."""
-    if not ACES_ADMIN_TOKEN:
-        return JSONResponse(
-            {"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403
-        )
-    if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
+    """Admin-only route to clear the local task cache."""
+    if (denied := _require_admin_debug_auth(request)) is not None:
+        return denied
 
     count = len(TASK_CACHE)
     TASK_CACHE.clear()
@@ -2485,7 +2489,7 @@ async def context_expert_file_download_route(request):
     Public, unguessable download route for Context Expert generated artifacts.
 
     The token maps to CustomGPT project/task/message/file metadata stored in the
-    local Render cache. Staff see this safe Render link in Copilot/Teams; the
+    local file-link cache. Staff see a link to this server in Copilot/Teams; the
     CustomGPT API token stays server-side.
     """
     token = str(request.path_params.get("token") or "").strip()
@@ -2578,12 +2582,8 @@ async def context_expert_file_download_route(request):
 
 @mcp.custom_route("/check-task", methods=["GET"])
 async def check_task_route(request):
-    if not ACES_ADMIN_TOKEN:
-        return JSONResponse(
-            {"enabled": False, "message": "Set ACES_ADMIN_TOKEN in Render to enable this debug route."}, status_code=403
-        )
-    if not _admin_authorized(request):
-        return JSONResponse({"error": "Unauthorized. Supply the x-aces-admin-token header."}, status_code=401)
+    if (denied := _require_admin_debug_auth(request)) is not None:
+        return denied
 
     project_id = str(request.query_params.get("project_id") or ASSESSMENT_PROJECT_ID).strip()
     task_id = str(request.query_params.get("task_id") or "").strip()
@@ -3638,7 +3638,7 @@ async def _create_context_expert_artifact_links(
     message_id: str,
     headers: dict[str, str],
 ) -> list[str]:
-    """List CustomGPT generated artifacts and create staff-safe Render download links."""
+    """List CustomGPT generated artifacts and create staff-safe download links through this server."""
     if not CONTEXT_EXPERT_FILE_LINKS_ENABLED:
         return []
     if not PUBLIC_BASE_URL:
@@ -4158,7 +4158,7 @@ async def _call_customgpt_task(
     # Duplicate-proofing: non-HomeHarvest tools can reuse cached answers.
     # HomeHarvest/address/comps lookups default to fresh submissions so repeated
     # Copilot tests actually reach CustomGPT/Context Expert instead of returning
-    # an old last_answer from the Render cache.
+    # an old last_answer from the task cache.
     existing_task = _find_existing_prompt_task(project_id, tool_name, prompt_text)
     if existing_task and should_reuse_prompt_cache:
         existing_answer = str(existing_task.get("last_answer") or "").strip()
@@ -4762,7 +4762,7 @@ def _requires_mcp_key(path: str) -> bool:
 class McpApiKeyMiddleware:
     """
     Require the API key on /mcp and /chat. Other routes are unaffected: / and
-    /health stay open for Render health checks, /ui is a static page, REST routes
+    /health stay open for health probes, /ui is a static page, REST routes
     keep their own admin token, and /context-expert-file links stay
     unguessable-token links for staff.
 
@@ -4828,6 +4828,6 @@ if __name__ == "__main__":
     if not ACES_MCP_API_KEY:
         _log("WARNING: ACES_MCP_API_KEY is not set - /mcp will refuse all requests")
     port = int(os.getenv("PORT", "10000"))
-    # HOST=127.0.0.1 keeps a local run reachable only from this PC. Render needs the 0.0.0.0 default.
+    # HOST=127.0.0.1 keeps a local run reachable only from this PC. Containers need the 0.0.0.0 default.
     host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
     uvicorn.run(app, host=host, port=port)

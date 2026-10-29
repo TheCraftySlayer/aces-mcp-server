@@ -56,18 +56,13 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastmcp import Client
 from starlette.responses import JSONResponse, StreamingResponse
 
 import aces_charts
-
-try:
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover
-    ZoneInfo = None
-
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
@@ -128,10 +123,8 @@ class ChatError(Exception):
 
 def _today_text() -> str:
     try:
-        if ZoneInfo is not None:
-            now = datetime.now(ZoneInfo("America/Denver"))
-            return now.strftime("%A, %B %d, %Y")
-    except Exception:
+        return datetime.now(ZoneInfo("America/Denver")).strftime("%A, %B %d, %Y")
+    except Exception:  # no time zone data
         pass
     return datetime.now(UTC).strftime("%A, %B %d, %Y")
 
@@ -360,7 +353,7 @@ async def _call_anthropic(messages: list[dict[str, Any]], tools: list[dict[str, 
             if attempt < 2:
                 await asyncio.sleep(2 * (attempt + 1))
                 continue
-            raise ChatError(f"Couldn't reach the Anthropic API: {exc.__class__.__name__}.")
+            raise ChatError(f"Couldn't reach the Anthropic API: {exc.__class__.__name__}.") from exc
 
         last_status = response.status_code
         if response.status_code in (429, 500, 502, 503, 529):
@@ -410,7 +403,7 @@ async def _managed_identity_token() -> str:
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
-        raise ChatError(f"Couldn't get a managed identity token for Azure OpenAI: {exc.__class__.__name__}.")
+        raise ChatError(f"Couldn't get a managed identity token for Azure OpenAI: {exc.__class__.__name__}.") from exc
     _token_cache["token"] = data.get("access_token", "")
     try:
         _token_cache["expires"] = float(data.get("expires_on", 0))
@@ -431,18 +424,12 @@ def _to_responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             items.append({"role": role, "content": content})
             continue
         texts: list[str] = []
-
-        def flush_text() -> None:
-            if texts:
-                items.append({"role": role, "content": "\n\n".join(texts)})
-                texts.clear()
-
         for block in content:
             kind = block.get("type")
             if kind == "text":
                 texts.append(block["text"])
             elif kind == "tool_use":
-                flush_text()
+                _flush_text(items, role, texts)
                 items.append(
                     {
                         "type": "function_call",
@@ -452,13 +439,20 @@ def _to_responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     }
                 )
             elif kind == "tool_result":
-                flush_text()
+                _flush_text(items, role, texts)
                 output = block.get("content") or ""
                 if block.get("is_error"):
                     output = "TOOL ERROR: " + output
                 items.append({"type": "function_call_output", "call_id": block["tool_use_id"], "output": output})
-        flush_text()
+        _flush_text(items, role, texts)
     return items
+
+
+def _flush_text(items: list[dict[str, Any]], role: str, texts: list[str]) -> None:
+    """Emit any text gathered so far as one message item, so text and tool calls keep their order."""
+    if texts:
+        items.append({"role": role, "content": "\n\n".join(texts)})
+        texts.clear()
 
 
 def _from_responses_output(data: dict[str, Any]) -> dict[str, Any]:
@@ -551,7 +545,7 @@ async def _call_azure_openai(messages: list[dict[str, Any]], tools: list[dict[st
             if attempt < 2:
                 await asyncio.sleep(2 * (attempt + 1))
                 continue
-            raise ChatError(f"Couldn't reach Azure OpenAI: {exc.__class__.__name__}.")
+            raise ChatError(f"Couldn't reach Azure OpenAI: {exc.__class__.__name__}.") from exc
 
         last_status = response.status_code
         if response.status_code == 401 and not AZURE_OPENAI_API_KEY and attempt < 2:

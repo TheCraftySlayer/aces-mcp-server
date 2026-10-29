@@ -54,14 +54,10 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastmcp.exceptions import ToolError
 from starlette.responses import JSONResponse
-
-try:
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover
-    ZoneInfo = None
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -128,9 +124,8 @@ def _today_mountain() -> date:
     it this falls back to UTC, which is already tomorrow after 5 or 6 PM local.
     """
     try:
-        if ZoneInfo is not None:
-            return datetime.now(ZoneInfo("America/Denver")).date()
-    except Exception:
+        return datetime.now(ZoneInfo("America/Denver")).date()
+    except Exception:  # no time zone data
         pass
     return datetime.now(UTC).date()
 
@@ -286,7 +281,7 @@ def _parse_date(value: Any, label: str) -> date:
     try:
         return date.fromisoformat(text)
     except ValueError:
-        raise ValueError(f"{label} must be a date in YYYY-MM-DD format.")
+        raise ValueError(f"{label} must be a date in YYYY-MM-DD format.") from None
 
 
 def _parse_grain(value: Any) -> str:
@@ -311,7 +306,7 @@ def _parse_tax_year(value: Any) -> int | None:
     try:
         year = int(value)
     except (TypeError, ValueError):
-        raise ValueError("taxYear must be a four-digit year, or 0 for all years.")
+        raise ValueError("taxYear must be a four-digit year, or 0 for all years.") from None
     if year < 2000 or year > 2100:
         raise ValueError("taxYear must be a four-digit year, or 0 for all years.")
     return year
@@ -323,7 +318,7 @@ def _parse_int(value: Any, label: str, low: int, high: int, default: int) -> int
     try:
         number = int(value)
     except (TypeError, ValueError):
-        raise ValueError(f"{label} must be a whole number from {low} to {high}.")
+        raise ValueError(f"{label} must be a whole number from {low} to {high}.") from None
     if not low <= number <= high:
         raise ValueError(f"{label} must be a whole number from {low} to {high}.")
     return number
@@ -411,7 +406,7 @@ def _format_rows(title: str, columns: list[str], rows: list[list[Any]], note: st
         return f"{title}\n{empty or 'No rows returned.'}\n{note}"
     lines = [title, f"{len(rows)} row(s)" + (" (limit reached)" if len(rows) >= MAX_ROWS else ""), ""]
     for idx, row in enumerate(rows, start=1):
-        pairs = [f"{col}: {'' if val is None else val}" for col, val in zip(columns, row)]
+        pairs = [f"{col}: {'' if val is None else val}" for col, val in zip(columns, row, strict=True)]
         lines.append(f"{idx}. " + " | ".join(pairs))
     lines.extend(["", note])
     return "\n".join(lines)
@@ -454,10 +449,10 @@ def register_sql_tools(
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
         except ImportError:
             log("SQL data tool failed - pyodbc not installed", tool=tool)
-            raise ToolError(f"{_ERROR_PREFIX} the server is missing the pyodbc package.")
+            raise ToolError(f"{_ERROR_PREFIX} the server is missing the pyodbc package.") from None
         except Exception as exc:
             log("SQL data tool failed", tool=tool, proc=proc, error=str(exc)[:500])
-            raise ToolError(f"{_ERROR_PREFIX} {_clean_sql_error(exc)}")
+            raise ToolError(f"{_ERROR_PREFIX} {_clean_sql_error(exc)}") from exc
         log("SQL data tool ok", tool=tool, proc=proc, rows=len(rows))
         if shape is not None:
             columns, rows = shape(columns, rows)
@@ -735,7 +730,7 @@ def register_sql_tools(
             return ""
         if not rows:
             return ""
-        rec = dict(zip([str(c).lower() for c in columns], rows[0]))
+        rec = dict(zip([str(c).lower() for c in columns], rows[0], strict=True))
         last = str(rec.get("last_deed_report_date") or "")[:10]
         try:
             missing = int(rec.get("open_days_missing") or 0)
@@ -837,10 +832,10 @@ def register_sql_tools(
             columns, rows = await asyncio.to_thread(_run_proc_with_retry, proc, params)
         except ImportError:
             log("SQL data tool failed - pyodbc not installed", tool=tool, proc=proc)
-            raise ToolError("the server is missing the pyodbc package.")
+            raise ToolError("the server is missing the pyodbc package.") from None
         except Exception as exc:
             log("SQL data tool failed", tool=tool, proc=proc, error=str(exc)[:500])
-            raise ToolError(_clean_sql_error(exc))
+            raise ToolError(_clean_sql_error(exc)) from exc
         log("SQL data tool ok", tool=tool, proc=proc, rows=len(rows))
         return columns, rows
 
@@ -916,7 +911,7 @@ def register_sql_tools(
             )
             last_open, last_row = _last_open_day(vol_cols, vol_rows)
         except ToolError as exc:
-            raise ToolError(f"{_ERROR_PREFIX} the briefing couldn't load recent office volume: {exc}")
+            raise ToolError(f"{_ERROR_PREFIX} the briefing couldn't load recent office volume: {exc}") from exc
 
         # Step 2: everything else, in parallel. A failed section is marked, not hidden.
         jobs = [

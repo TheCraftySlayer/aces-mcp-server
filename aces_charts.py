@@ -183,7 +183,7 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
             try:
                 cells = _split_cells(m.group(2))
             except ValueError:
-                raise ChartError(f"Couldn't read row {len(rows) + 1} of '{title}'.")
+                raise ChartError(f"Couldn't read row {len(rows) + 1} of '{title}'.") from None
             names = [c[0] for c in cells]
             if not columns:
                 columns = names
@@ -356,7 +356,7 @@ def build_chart(args: dict[str, Any], sources: list[dict[str, Any]]) -> tuple[di
             try:
                 out.append(_number(row.get(col, "")))
             except ValueError:
-                raise ChartError(f"{col} isn't a numeric column (row {n} has '{_clip(row.get(col), 40)}').")
+                raise ChartError(f"{col} isn't a numeric column (row {n} has '{_clip(row.get(col), 40)}').") from None
         return out
 
     original = {c.lower(): c for c in table["columns"]}
@@ -380,7 +380,7 @@ def build_chart(args: dict[str, Any], sources: list[dict[str, Any]]) -> tuple[di
         if chart_type != "line":
             raise ChartError("A shaded range only works on a line chart.")
         low, high = column_values(low_col), column_values(high_col)
-        for n, (lo, hi) in enumerate(zip(low, high), start=1):
+        for n, (lo, hi) in enumerate(zip(low, high, strict=True), start=1):
             if lo is not None and hi is not None and lo > hi:
                 raise ChartError(f"Row {n} has {low_col} above {high_col}; check the column order.")
         band = {"low": low, "high": high, "label": _clip(args.get("rangeLabel"), MAX_LABEL_CHARS) or "Range"}
@@ -519,7 +519,9 @@ def _alternate_band(rows, low_col, high_col, label, column_values) -> dict[str, 
         low, high = column_values(alt_low), column_values(alt_high)
     except ChartError:
         return None
-    if all(v is None for v in low) or any(lo is not None and hi is not None and lo > hi for lo, hi in zip(low, high)):
+    if all(v is None for v in low) or any(
+        lo is not None and hi is not None and lo > hi for lo, hi in zip(low, high, strict=True)
+    ):
         return None
     alt_label = label.replace(have + "%", other + "%") if have + "%" in label else f"{other}% range"
     return {"low": low, "high": high, "label": alt_label}
