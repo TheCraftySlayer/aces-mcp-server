@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="aces-user" content="__ACES_USER__">
+<meta name="aces-login" content="__ACES_LOGIN_URL__">
+<meta name="aces-logout" content="__ACES_LOGOUT_URL__">
 <title>A.C.E.S.</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231D2B36'/%3E%3Cpath d='M6 24 L13 8 L19 18 L26 12' stroke='%23E0809C' stroke-width='2.5' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style nonce="__CSP_NONCE__">
@@ -518,16 +520,19 @@ let chatBusy = false;
 
 class AuthError extends Error {}
 
-// Filled in by the server when the person came in through county sign-in.
-const signedInUser = (() => {
-  const m = document.querySelector('meta[name="aces-user"]');
+// Filled in by the server. An unfilled placeholder starts with "__". Don't write a
+// placeholder's full name here: the server replaces every copy of it, which would blank
+// these checks.
+function metaValue(name, fallback) {
+  const m = document.querySelector('meta[name="' + name + '"]');
   const v = m ? (m.getAttribute("content") || "").trim() : "";
-  // An unfilled placeholder starts with "__". Don't write the placeholder's full name
-  // here: the server replaces every copy of it, which would blank this check.
-  return v && !v.startsWith("__") ? v : "";
-})();
-const LOGIN_URL = "/.auth/login/aad?post_login_redirect_uri=/ui";
-const LOGOUT_URL = "/.auth/logout?post_logout_redirect_uri=/ui";
+  return v && !v.startsWith("__") ? v : fallback;
+}
+// Set when the person came in through county sign-in.
+const signedInUser = metaValue("aces-user", "");
+// App Service sign-in on Azure, or this server's own sign-in on a county server.
+const LOGIN_URL = metaValue("aces-login", "/.auth/login/aad?post_login_redirect_uri=/ui");
+const LOGOUT_URL = metaValue("aces-logout", "/.auth/logout?post_logout_redirect_uri=/ui");
 
 function authHeaders() {
   // Signed-in browsers are authorized by their sign-in session; the key is only for key mode.

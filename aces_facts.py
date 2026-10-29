@@ -16,6 +16,8 @@ import datetime as dt
 import json
 import os
 
+from aces_common import _log
+
 FACTS_PATH = os.getenv(
     "ACES_FACTS_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "aces_facts.json"),
@@ -112,9 +114,7 @@ def key_facts(topic: str = "", tax_year: int | None = None, today: dt.date | Non
         for f in draft:
             out.append(f"- [{f['id']}] {f['fact']}")
 
-    print(
-        f"[aces] key facts topic={t!r} tax_year={tax_year} reviewed={len(reviewed)} open={len(open_)} draft={len(draft)}"
-    )
+    _log("key facts", topic=repr(t), tax_year=tax_year, reviewed=len(reviewed), open=len(open_), draft=len(draft))
     return "\n".join(out)
 
 
@@ -122,7 +122,7 @@ def register(mcp):
     try:
         topics, _ = _load()
     except Exception as e:  # noqa: BLE001  the tool still registers and reports the problem when called
-        print(f"[aces] key facts file problem: {e}")
+        _log("key facts file problem", error=str(e))
         topics = ["(facts file unreadable)"]
 
     @mcp.tool(name="ACES_Key_Facts", description=DESCRIPTION.format(topics="; ".join(topics)))

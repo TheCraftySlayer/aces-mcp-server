@@ -30,7 +30,8 @@ flowchart LR
 | File | What it does |
 |---|---|
 | `server.py` | The app: the MCP tool definitions, the chat page, `/health`, and wiring the modules below together. |
-| `aces_access.py` | Who may call what: the access key for `/mcp` and `/chat`, county sign-in, and the admin token. |
+| `aces_access.py` | Who may call what: the access key for `/mcp` and `/chat`, county sign-in, the allowed users and groups, and the admin token. |
+| `aces_oidc.py` | County sign-in run by the server itself (Entra ID, OpenID Connect), for a county server without App Service. |
 | `aces_customgpt.py` | The CustomGPT specialists: settings, the task cache, submitting and polling tasks, and download links for generated files. |
 | `aces_routing.py` | Reads a staff prompt to decide what extra work it needs (HomeHarvest, a report, a map, an ArcGIS-only lookup). |
 | `aces_arcgis.py` | The public BernCo ArcGIS parcel layer: lookups, map links, candidate peers and parcel context for specialist prompts. |
@@ -84,7 +85,8 @@ settings are present. Without them the server lists 11 tools.
 
 | Route | Who can call it |
 |---|---|
-| `/mcp`, `/chat` | Callers with the MCP access key (`x-aces-mcp-key` header or `Authorization: Bearer`), or a county user signed in through App Service authentication (only the accounts in `ACES_ALLOWED_USERS`, when it's set). With no key configured, key callers get 503. |
+| `/mcp`, `/chat` | Callers with the MCP access key (`x-aces-mcp-key` header or `Authorization: Bearer`), or a county user signed in through App Service authentication or the server's own sign-in (only members of `ACES_ALLOWED_GROUPS` and accounts in `ACES_ALLOWED_USERS`, when either is set). With no key configured, key callers get 503. |
+| `/auth/login`, `/auth/callback`, `/auth/logout` | The server's own county sign-in. Answer 404 unless `ACES_OIDC_*` is set and App Service sign-in is off. |
 | `/start-lookup`, `/check-pending-task`, `/smart-task`, `/agent-call`, `/data-tool`, `/arcgis-*` | Power Automate, with the admin token in the `x-aces-admin-token` header. |
 | `/task-cache`, `/task-cache/clear`, `/check-task`, `/health/details` | Admin token only. Off when no admin token is set. `/health/details` shows the settings in effect and the tools actually registered. |
 | `/context-expert-file/{token}` | Anyone with the link. Tokens are random and expire (`ACES_FILE_LINK_TTL_SECONDS`, default one day). |
@@ -95,6 +97,14 @@ Points a reviewer usually asks about:
 
 - **Key comparisons** use `secrets.compare_digest`. Tokens are read from headers only,
   never the query string, so they don't land in access logs.
+- **Two kinds of county sign-in, one access rule.** On Azure, App Service authentication signs
+  staff in. On a county server, the server does it itself (`aces_oidc.py`): Entra ID with the
+  authorization code flow and PKCE, state and nonce checks, ID token signature, issuer,
+  audience and tenant checks, and an HttpOnly, Secure, SameSite=Lax session cookie signed with
+  the server's secret (8 hours by default). Either way, who gets in is decided by
+  `ACES_ALLOWED_GROUPS` (Entra security groups) and `ACES_ALLOWED_USERS`.
+  `tests/test_server_signin.py` runs the whole sign-in against a stand-in Entra, including
+  wrong state, nonce, tenant, audience, signing key and expired or altered cookies.
 - **Sign-in headers are trusted only when App Service authentication is really on**:
   `ACES_ENTRA_SIGNIN=true` *and* `WEBSITE_AUTH_ENABLED=true`. App Service sets the
   second one itself and strips client-sent `X-MS-CLIENT-PRINCIPAL*` headers. If
@@ -187,7 +197,11 @@ All settings are environment variables. Only the first group is needed to start.
 | `ACES_MCP_API_KEY` | Access key for `/mcp` and `/chat`. |
 | `ACES_ADMIN_TOKEN` | Turns on the REST wrappers and admin routes. |
 | `HOST`, `PORT` | Defaults `0.0.0.0` and `10000`. Local runs use `127.0.0.1`. |
-| `ACES_ENTRA_SIGNIN`, `ACES_ALLOWED_USERS` | County sign-in on Azure, and the comma-separated list of accounts allowed in. |
+| `ACES_ENTRA_SIGNIN` | County sign-in through App Service authentication (Azure only). |
+| `ACES_OIDC_TENANT_ID`, `ACES_OIDC_CLIENT_ID`, `ACES_OIDC_CLIENT_SECRET`, `ACES_OIDC_REDIRECT_URI` | County sign-in run by the server, for a county server. The options are explained at the top of `aces_oidc.py`. `ACES_SESSION_HOURS` (default 8) sets how long a sign-in lasts. |
+| `ACES_ALLOWED_GROUPS`, `ACES_ALLOWED_USERS` | Who gets in through either sign-in: comma-separated Entra group object IDs, and sign-in names. Use a group for a staff-wide rollout. |
+| `ACES_TLS_CERT_FILE`, `ACES_TLS_KEY_FILE`, `ACES_TLS_KEY_PASSWORD` | Serve HTTPS directly (PEM files), for a county server with nothing in front of it. |
+| `ACES_LOG_FILE`, `ACES_LOG_KEEP_DAYS` | Also write the log to a file that starts fresh each midnight, keeping this many days (default 90). For a county server where nothing collects stdout. |
 | `CUSTOMGPT_API_TOKEN` | CustomGPT API token. |
 | `COMMUNITY_PROJECT_ID`, `ASSESSMENT_PROJECT_ID`, `CLEAR_PROJECT_ID`, `COMPLIANCE_PROJECT_ID`, `SMART_TASKS_PROJECT_ID` | CustomGPT project for each specialist. |
 | `ACES_SQL_TOOLS_ENABLED`, `ACES_SQL_SERVER`, `ACES_SQL_DATABASE`, `ACES_SQL_AUTH`, `ACES_SQL_USER`, `ACES_SQL_PASSWORD`, `ACES_SQL_TRUST_SERVER_CERT` | ACES database connection. The options are explained at the top of `aces_sql_tools.py`. |

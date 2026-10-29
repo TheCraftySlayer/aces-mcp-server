@@ -85,3 +85,17 @@ def test_principal_claims_are_read_and_bad_ones_ignored():
     assert aces_access._principal_name({"x-ms-client-principal": "not base64!"}) == ""
     assert aces_access._principal_name({"x-ms-client-principal": encoded(["a list", "not a dict"])}) == ""
     assert aces_access._principal_name({}) == ""
+
+
+def test_app_service_group_claims_grant_access(client, signin_on, monkeypatch):
+    monkeypatch.setattr(aces_access, "ALLOWED_GROUPS", {"group-staff"})
+
+    def principal(groups):
+        claims = [{"typ": "preferred_username", "val": "someone@bernco.gov"}]
+        claims += [{"typ": "groups", "val": g} for g in groups]
+        return base64.b64encode(json.dumps({"claims": claims}).encode()).decode()
+
+    member = {**MCP_HEADERS, "X-MS-CLIENT-PRINCIPAL": principal(["Group-Staff"])}
+    assert client.post("/mcp", headers=member, json=LIST_TOOLS).status_code == 200
+    outsider = {**MCP_HEADERS, "X-MS-CLIENT-PRINCIPAL": principal(["other"])}
+    assert client.post("/mcp", headers=outsider, json=LIST_TOOLS).status_code == 403
