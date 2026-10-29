@@ -42,7 +42,8 @@ flowchart LR
 | `aces_chat.py` | `POST /chat`: the tool loop behind the staff chat page, for either Azure OpenAI or Anthropic. |
 | `aces_charts.py` | `Build_Chart`, a chat-only tool. It reads every chart value from a data tool result already in the conversation, never from the model. |
 | `aces_facts.py`, `aces_facts.json` | `ACES_Key_Facts`: staff-reviewed figures, deadlines and citations. |
-| `sign_facts.py` | Signs reviewed facts rows with a reviewer's name and today's date. |
+| `sign_facts.py` | Signs reviewed facts rows with a reviewer's name and today's date, or co-signs them as the topic owner. |
+| `copilot/agent-instructions.md` | The Copilot Studio agent's instructions, kept here so they're reviewed with the code. Pasted into Copilot Studio by hand; a test keeps them under the 8,000-character cap and in step with the server's tool names. |
 | `web_ui.html` | The staff chat page. |
 | `fonts/` | The chat page's two typefaces (Public Sans, IBM Plex Mono) and their SIL Open Font License files, served by the server so the page calls no outside site. |
 | `start-aces.bat`, `start-aces.ps1` | Starts the server on a Windows PC and opens the chat. |

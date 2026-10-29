@@ -144,6 +144,8 @@ def _today_text() -> str:
 
 
 def _system_prompt() -> str:
+    # The Copilot Studio agent gets the same rules from copilot/agent-instructions.md, pasted in
+    # by hand. Change a rule here and there in the same commit.
     return (
         "You are A.C.E.S., the staff assistant for the Bernalillo County Assessor's Office in New Mexico. "
         f"Today is {_today_text()} (Mountain time).\n\n"
