@@ -123,7 +123,7 @@
       "tax_year": null,
       "status": "draft",
       "fact": "Apply within 30 days of the mailing of the Notice of Value.",
-      "source": "Bernalillo County Assessor For New Homeowners page",
+      "source": "Section 7-38-17(C) NMSA 1978; Bernalillo County Assessor For New Homeowners page",
       "source_url": "https://www.bernco.gov/assessor/for-new-homeowners/",
       "reviewed_by": "",
       "last_reviewed": ""
@@ -133,8 +133,8 @@
       "topic": "head of family",
       "tax_year": null,
       "status": "draft",
-      "fact": "Once claimed, the exemption stays on the property in later years without reapplying. It comes off when the property changes owners, and the new owner has to apply.",
-      "source": "Bernalillo County Assessor Know Your Value FAQ (2026); Section 7-38-17 NMSA 1978; county assessor guidance (Los Alamos, Chaves)",
+      "fact": "Once claimed and allowed, the exemption is applied automatically in later years without reapplying, as long as the owner's eligibility and the property's ownership don't change. When the property changes owners, the new owner has to apply.",
+      "source": "Section 7-38-17(A) NMSA 1978; Bernalillo County Assessor Know Your Value FAQ (2026)",
       "source_url": "https://www.bernco.gov/assessor/wp-content/uploads/sites/44/2026/01/FAQ-Trifold-2026.pdf",
       "reviewed_by": "",
       "last_reviewed": ""
@@ -215,7 +215,7 @@
       "topic": "veteran exemption",
       "tax_year": null,
       "status": "draft",
-      "fact": "Starting with tax year 2026, a veteran with a service-connected disability rating from 10% to 100% can get a property tax exemption proportional to that rating.",
+      "fact": "Starting with tax year 2026, a veteran with a service-connected disability rating from 10% to 100% can get an exemption on their primary residence equal to the rating percentage times the property's value after the regular veteran exemption. Before 2026, only veterans rated 100% disabled qualified, for a full exemption.",
       "source": "Section 7-37-5.1 NMSA 1978, as amended by House Bill 47 (2025) and House Bill 285 (2026); NM Taxation and Revenue Department news release, Aug 13, 2026",
       "source_url": "https://www.tax.newmexico.gov/wp-content/uploads/2026/08/20260813_New-Mexico-Veterans-Benefit-from-Expanded-Property-Tax-Exemptions.pdf",
       "reviewed_by": "",
