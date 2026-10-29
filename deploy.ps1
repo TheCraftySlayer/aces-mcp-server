@@ -7,7 +7,7 @@
     1. Key files contain code the server can't run without (catches a stale or wrong copy).
     2. requirements.txt is fully pinned.
     3. Git is committed and pushed, so the image matches GitHub.
-    4. The Python files compile.
+    4. The Python files compile, and the tests in tests/ pass (when pytest is installed).
     5. The server starts locally with test settings and lists every tool.
        (This is the check that would have caught the October 15 crash, when server.py
        passed an argument the copy of aces_sql_tools.py on disk didn't accept.)
@@ -28,7 +28,7 @@ param(
     [string]$App           = "aces-mcp-bernco",
     [string]$Registry      = "acesmcpbernco",
     [string]$Repo          = "aces-mcp",
-    [int]$ExpectedTools    = 20,
+    [int]$ExpectedTools    = 21,
     [int]$VerifyMinutes    = 8,
     [switch]$SkipSmokeTest,
     [switch]$AllowDirty
@@ -58,6 +58,8 @@ Write-Step "1. Code checks"
 $markers = @(
     @{ File = "server.py";         Text = "aces_sql_tools.register_sql_tools(" },
     @{ File = "server.py";         Text = "ACES_BUILD_TAG" },
+    @{ File = "server.py";         Text = "aces_facts.register(" },
+    @{ File = "aces_facts.json";   Text = '"facts"' },
     @{ File = "aces_sql_tools.py"; Text = "no_outcome_calls" },
     @{ File = "aces_chat.py";      Text = "import aces_charts" },
     @{ File = "aces_charts.py";    Text = "def build_chart(" },
@@ -100,9 +102,18 @@ Write-Step "4. Compile"
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Stop-Deploy "python isn't on PATH. Install it, or run from the shell where start-aces.bat works."
 }
-python -m py_compile server.py aces_chat.py aces_sql_tools.py aces_charts.py
+python -m py_compile server.py aces_chat.py aces_sql_tools.py aces_charts.py aces_facts.py
 if ($LASTEXITCODE -ne 0) { Stop-Deploy "a Python file doesn't compile (see the error above)." }
 Write-Ok "Python files compile"
+
+python -c "import pytest" 2>$null
+if ($LASTEXITCODE -eq 0) {
+    python -m pytest -q
+    if ($LASTEXITCODE -ne 0) { Stop-Deploy "the tests failed (see above). Nothing was built." }
+    Write-Ok "tests pass"
+} else {
+    Write-Host "  warning: pytest isn't installed, so the tests were skipped (pip install -r requirements-dev.txt)" -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 if ($SkipSmokeTest) {
