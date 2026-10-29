@@ -743,6 +743,8 @@ def _normalize_aces_result(
         "missing taskid",
         "missing task id",
         "missing task_id",
+        "unknown project id",
+        "invalid task id",
         "task submit failed",
         "task poll failed",
         "task failed",
@@ -2519,8 +2521,10 @@ async def context_expert_file_download_route(request):
     file_id = str(meta.get("file_id") or "").strip()
     file_name = _safe_download_filename(str(meta.get("file_name") or f"context_expert_file_{file_id}"))
 
-    if not all([project_id, task_id, message_id, file_id]):
+    if not all(_valid_customgpt_id(value) for value in (project_id, task_id, message_id, file_id)):
         return JSONResponse({"status": "failed", "answer": "Download link metadata is incomplete."}, status_code=500)
+    if project_id not in _known_project_ids():
+        return JSONResponse({"status": "failed", "answer": "Download link is for an unknown project."}, status_code=500)
 
     if not CUSTOMGPT_API_TOKEN:
         return JSONResponse({"status": "failed", "answer": "Server is missing CUSTOMGPT_API_TOKEN."}, status_code=500)
@@ -3156,11 +3160,37 @@ async def agent_call_route(request):
         )
 
 
+# Project and task IDs go into CustomGPT URLs that carry the server's API token, and some
+# of them come from callers (Check_CustomGPT_Task, /check-pending-task, /smart-task).
+# Only this server's own specialist projects are allowed, and IDs may hold only letters,
+# digits, dashes and underscores, so a value like "9262/../../12345" can't reach
+# another project or another API path.
+_CUSTOMGPT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _known_project_ids() -> list[str]:
+    """The CustomGPT projects this server is set up to call."""
+    configured = (
+        COMMUNITY_PROJECT_ID,
+        ASSESSMENT_PROJECT_ID,
+        CLEAR_PROJECT_ID,
+        COMPLIANCE_PROJECT_ID,
+        SMART_TASKS_PROJECT_ID,
+    )
+    return sorted({project for project in configured if project})
+
+
+def _valid_customgpt_id(value: Any) -> bool:
+    return bool(_CUSTOMGPT_ID_PATTERN.fullmatch(str(value or "")))
+
+
 def _require_config(project_id: str, tool_name: str) -> str | None:
     if not CUSTOMGPT_API_TOKEN:
         return "Missing CUSTOMGPT_API_TOKEN on this server."
     if not project_id:
         return f"Missing project id for {tool_name}. Set it in the server's environment."
+    if project_id not in _known_project_ids():
+        return f"Unknown project ID for {tool_name}. Use one of: {', '.join(_known_project_ids())}."
     return None
 
 
@@ -3788,6 +3818,8 @@ async def _check_customgpt_task_result(project_id: str, task_id: str) -> str:
         return config_error
     if not task_id:
         return "Missing taskId."
+    if not _valid_customgpt_id(task_id):
+        return "Invalid task ID. Task IDs are letters, digits, dashes and underscores only."
 
     cached_answer = _cached_answer_for_task(project_id, task_id)
     if cached_answer:
