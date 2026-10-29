@@ -16,6 +16,13 @@ How it works
   - Build_Chart (aces_charts.py) is offered to the chat model as one more tool
     but runs here, not through MCP. It reads values from a data tool result
     already in the conversation, never from the model, and the browser draws it.
+  - Tool results are signed. Because the browser keeps the conversation, it could
+    send back a tool result the server never produced (a made-up ACES figure or a
+    fake reviewed fact) or change a real one. Each tool result the server returns
+    carries a signature over the tool call and its result, made with the server's
+    own secret (aces_keys.py). When the conversation comes back, any tool result
+    whose signature doesn't check out is replaced with a note saying it was removed,
+    so neither the model nor Build_Chart ever treats it as tool output.
 
 Settings (environment variables)
   ACES_CHAT_PROVIDER         azure_openai or anthropic. Default: azure_openai when
@@ -63,6 +70,7 @@ from fastmcp import Client
 from starlette.responses import JSONResponse, StreamingResponse
 
 import aces_charts
+import aces_keys
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
@@ -113,8 +121,14 @@ PREVIEW_CHARS = 1200
 _ALLOWED_BLOCK_KEYS = {
     "text": ("type", "text"),
     "tool_use": ("type", "id", "name", "input"),
-    "tool_result": ("type", "tool_use_id", "content", "is_error"),
+    "tool_result": ("type", "tool_use_id", "content", "is_error", "sig"),
 }
+
+UNVERIFIED_RESULT_TEXT = (
+    "This earlier tool result couldn't be verified as coming from this server, so it was removed. "
+    "Call the tool again if it's needed."
+)
+_RESULT_KEY = aces_keys.derive("chat-tool-result")
 
 
 class ChatError(Exception):
@@ -272,7 +286,78 @@ def _clean_block(block: Any) -> dict[str, Any] | None:
         out["tool_use_id"] = str(out["tool_use_id"])
         out["content"] = _tool_result_text(out.get("content"))[:MAX_TOOL_RESULT_CHARS]
         out["is_error"] = bool(out.get("is_error", False))
+        if "sig" in out:
+            out["sig"] = str(out["sig"])[:128]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Signed tool results
+# ---------------------------------------------------------------------------
+
+
+def _canon(value: Any) -> Any:
+    """Tool input as it survives a trip through the browser: JSON there writes 1.0 as 1."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {str(k): _canon(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_canon(v) for v in value]
+    return value
+
+
+def _result_payload(use: dict[str, Any], result: dict[str, Any]) -> bytes:
+    """What a signature covers: the call (id, tool name, input) and its result, so neither can be swapped or edited."""
+    return json.dumps(
+        [
+            str(use.get("id", "")),
+            str(use.get("name", "")),
+            _canon(use.get("input") or {}),
+            str(result.get("content", "")),
+            bool(result.get("is_error")),
+        ],
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+def _result_signature(use: dict[str, Any], result: dict[str, Any]) -> str:
+    return aces_keys.sign(_RESULT_KEY, _result_payload(use, result))
+
+
+def _signed_results(results: list[dict[str, Any]], uses_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copies of this round's results with signatures, for the browser. The model gets the unsigned ones."""
+    return [{**r, "sig": _result_signature(uses_by_id[r["tool_use_id"]], r)} for r in results]
+
+
+def _verify_tool_results(messages: list[dict[str, Any]]) -> int:
+    """
+    Check every tool result in a conversation that came back from the browser, in place.
+    A result keeps its content only if its signature matches the tool call before it.
+    Anything else (no signature, edited content, a call that was renamed or never
+    happened) becomes an error result saying it was removed. Signatures are taken off
+    either way, so they never reach the model. Returns how many results were removed.
+    """
+    uses: dict[str, dict[str, Any]] = {}
+    removed = 0
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            kind = block.get("type")
+            if kind == "tool_use":
+                uses[block["id"]] = block
+            elif kind == "tool_result":
+                signature = block.pop("sig", "")
+                use = uses.get(block["tool_use_id"])
+                if use is None or not aces_keys.verify(_RESULT_KEY, _result_payload(use, block), signature):
+                    block["content"] = UNVERIFIED_RESULT_TEXT
+                    block["is_error"] = True
+                    removed += 1
+    return removed
 
 
 def _is_question(message: dict[str, Any]) -> bool:
@@ -705,6 +790,7 @@ async def _run_chat(mcp, history: list[dict[str, Any]], emit, log) -> None:
 
             stop_reason = response.get("stop_reason")
             tool_uses = [b for b in blocks if b["type"] == "tool_use"]
+            uses_by_id = {b["id"]: b for b in tool_uses}
             reply_text = "\n\n".join(b["text"] for b in blocks if b["type"] == "text").strip()
 
             if stop_reason != "tool_use" or not tool_uses:
@@ -728,9 +814,8 @@ async def _run_chat(mcp, history: list[dict[str, Any]], emit, log) -> None:
                     }
                     for b in tool_uses
                 ]
-                tool_turn = {"role": "user", "content": results}
-                conversation.append(tool_turn)
-                new_messages.append(tool_turn)
+                conversation.append({"role": "user", "content": results})
+                new_messages.append({"role": "user", "content": _signed_results(results, uses_by_id)})
                 stop_note = {
                     "role": "assistant",
                     "content": [
@@ -756,9 +841,9 @@ async def _run_chat(mcp, history: list[dict[str, Any]], emit, log) -> None:
                 for b in chart_uses:
                     by_id[b["id"]] = await _run_chart_tool(b, sources, emit, log)
             results = [by_id[b["id"]] for b in tool_uses]
-            tool_turn = {"role": "user", "content": list(results)}
-            conversation.append(tool_turn)
-            new_messages.append(tool_turn)
+            # The model gets the results as they are; the browser gets signed copies to send back.
+            conversation.append({"role": "user", "content": list(results)})
+            new_messages.append({"role": "user", "content": _signed_results(results, uses_by_id)})
 
     log(
         "chat answered",
@@ -793,9 +878,12 @@ def register_chat(mcp: Any, log: Callable[..., None]) -> bool:
             history = _clean_history(body.get("messages") if isinstance(body, dict) else None)
         except ChatError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+        removed = _verify_tool_results(history)
 
         # Set by the middleware in aces_access.py when the request came from a county sign-in.
         user = str((request.scope.get("state") or {}).get("aces_user") or "")
+        if removed:
+            log("chat history had tool results that didn't verify", removed=removed, user=user or None)
 
         def chat_log(message: str, **kwargs: Any) -> None:
             if user:
