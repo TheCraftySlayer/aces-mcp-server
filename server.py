@@ -945,10 +945,14 @@ _ARCGIS_CITY_TRAILING_WORDS = [
 
 
 def _clean_arcgis_sql_text(value: str) -> str:
-    """Normalize text for ArcGIS SQL where clauses and escape single quotes."""
+    """
+    Normalize text for ArcGIS SQL where clauses: escape single quotes, and drop the LIKE
+    wildcards (% and _, plus [ ] on a SQL Server backend) so a search can't be widened
+    to every parcel. Addresses, owner names and UPCs don't use those characters.
+    """
     cleaned = str(value or "").upper()
     cleaned = cleaned.replace("NEW MEXICO", "NM")
-    cleaned = re.sub(r"[,;]+", " ", cleaned)
+    cleaned = re.sub(r"[,;%_\[\]]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned.replace("'", "''")
 
