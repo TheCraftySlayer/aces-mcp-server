@@ -34,3 +34,12 @@ def test_snapshot_lists_grants_columns_and_definitions():
     assert "CREATE PROCEDURE ai_api.office_volume\nAS SELECT 1;\nGO" in text
     assert "\r" not in text
     assert "1 sql stored procedure; 1 table(s)." in text
+
+
+def test_objects_without_readable_text_are_caught():
+    modules = [
+        ("office_volume", "SQL_STORED_PROCEDURE", "CREATE PROCEDURE ai_api.office_volume AS SELECT 1;"),
+        ("forecast", "SQL_STORED_PROCEDURE", None),
+        ("nov_search", "SQL_STORED_PROCEDURE", "  "),
+    ]
+    assert export_ai_api.missing_text(modules) == ["forecast", "nov_search"]

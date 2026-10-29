@@ -114,10 +114,27 @@ def _connect(args):
     ]
     if args.windows:
         parts.append("Trusted_Connection=yes")
+        who = "your Windows account"
     else:
-        password = getpass.getpass(f"Password for {args.user} on {args.server}: ")
+        password = getpass.getpass(f"Password for {args.user} on {args.server} (nothing shows as you type): ")
         parts += [f"UID={args.user}", "PWD={" + password.replace("}", "}}") + "}"]
-    return pyodbc.connect(";".join(parts) + ";", timeout=30)
+        who = args.user
+    try:
+        return pyodbc.connect(";".join(parts) + ";", timeout=30)
+    except pyodbc.Error as exc:
+        detail = str(exc.args[1] if len(exc.args) > 1 else exc)
+        if "18456" in detail:
+            raise SystemExit(
+                f"SQL Server refused the sign-in for {who} on {args.server} (error 18456). Usually the password "
+                "was mistyped, since nothing shows as you type; run it again. If it keeps failing, check that this "
+                "login works in SSMS with SQL Server Authentication against the same server name."
+            ) from None
+        raise SystemExit(f"Couldn't connect to {args.server}: {detail}") from None
+
+
+def missing_text(modules) -> list[str]:
+    """ai_api objects this login can see but not read: their definition comes back empty."""
+    return [name for name, _, definition in modules if not (definition or "").strip()]
 
 
 def main() -> None:
@@ -141,7 +158,16 @@ def main() -> None:
         conn.close()
 
     if not modules:
-        raise SystemExit("No ai_api definitions came back. Does this login have VIEW DEFINITION?")
+        raise SystemExit("No ai_api objects came back. Is this the right database?")
+    # A login that can run the procedures but lacks VIEW DEFINITION sees them with empty text.
+    # A snapshot like that would look complete and prove nothing, so don't write one.
+    hidden = missing_text(modules)
+    if hidden:
+        raise SystemExit(
+            f"This login can see {len(hidden)} ai_api object(s) but not their text ({', '.join(hidden[:5])}"
+            f"{', ...' if len(hidden) > 5 else ''}). It needs VIEW DEFINITION on the ai_api schema; "
+            "use ASR_CS_Owner or another db_owner login. Nothing was written."
+        )
     text = render_snapshot(args.server, args.database, datetime.now(UTC), modules, columns, grants)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(text, encoding="utf-8", newline="\n")
