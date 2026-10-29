@@ -229,8 +229,10 @@ every tool; live answers are checked by hand.
 
 `sql/` holds the database side. `sql/current/ai_api.sql` is the `ai_api` schema as it
 is in the database (every procedure the tools call, the `tool_log` columns and every
-permission on the schema), written by `sql/export_ai_api.py`; read it to check what each
-procedure the data tools call does. The numbered scripts are the changes applied, in order.
+permission on the schema), written by `sql/export_ai_api.py`. Read it to check what each
+procedure the data tools call does. `tests/test_ai_api_snapshot.py` checks it on every run:
+each procedure must log its calls to `ai_api.tool_log` and write nothing else. The numbered
+scripts are the changes applied, in order.
 `sql/README.md` explains each file.
 
 ## Known gaps

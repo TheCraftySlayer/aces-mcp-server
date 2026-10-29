@@ -26,12 +26,15 @@ def test_snapshot_lists_grants_columns_and_definitions():
             ("aces-mcp-bernco", "EXECUTE", "GRANT", None),
             ("someone", "SELECT", "DENY", "tool_log"),
         ],
+        members=[("ai_api_executor", "ASR_CS_User"), ("db_datareader", "ASR_CS_User")],
     )
     assert "GRANT EXECUTE ON SCHEMA::[ai_api] TO [aces-mcp-bernco];" in text
     assert "DENY SELECT ON [ai_api].[tool_log] TO [someone];" in text
     assert "--   logged_utc  datetime2(3)  NOT NULL" in text
     assert "--   caller  nvarchar(128)  NULL" in text
     assert "CREATE PROCEDURE ai_api.office_volume\nAS SELECT 1;\nGO" in text
+    assert "ALTER ROLE [ai_api_executor] ADD MEMBER [ASR_CS_User];" in text
+    assert "ALTER ROLE [db_datareader] ADD MEMBER [ASR_CS_User];" in text
     assert "\r" not in text
     assert "1 sql stored procedure; 1 table(s)." in text
 

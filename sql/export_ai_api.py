@@ -1,7 +1,7 @@
 """
 Writes sql/current/ai_api.sql: every ai_api procedure, function and view as it is in the
-database right now, the columns of the ai_api tables, and every permission granted on the
-ai_api schema or its objects. Commit that file, so a reviewer can see exactly what each
+database right now, the columns of the ai_api tables, every permission granted on the
+ai_api schema or its objects, and the database roles of everyone who can run them. Commit that file, so a reviewer can see exactly what each
 procedure the data tools call does, and who may run it, without database access.
 
 Run it after any ai_api change, with a login that can see definitions (ASR_CS_Owner or
@@ -49,6 +49,29 @@ SELECT pr.name, p.permission_name, p.state_desc,
 """
 
 
+MEMBERS_SQL = """
+WITH holders AS (
+    SELECT DISTINCT p.grantee_principal_id AS principal_id
+      FROM sys.database_permissions p
+     WHERE (p.class = 3 AND p.major_id = SCHEMA_ID(N'ai_api'))
+        OR (p.class = 1 AND p.minor_id = 0 AND OBJECT_SCHEMA_NAME(p.major_id) = N'ai_api')
+),
+can_run AS (
+    SELECT principal_id FROM holders
+    UNION
+    SELECT rm.member_principal_id
+      FROM sys.database_role_members rm
+     WHERE rm.role_principal_id IN (SELECT principal_id FROM holders)
+)
+SELECT r.name, m.name
+  FROM sys.database_role_members rm
+  JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id
+  JOIN sys.database_principals m ON m.principal_id = rm.member_principal_id
+ WHERE rm.member_principal_id IN (SELECT principal_id FROM can_run)
+ ORDER BY 2, 1;
+"""
+
+
 def _type_text(type_name: str, max_length: int, precision: int, scale: int) -> str:
     if type_name in {"varchar", "char", "varbinary", "binary"}:
         return f"{type_name}({'max' if max_length == -1 else max_length})"
@@ -68,7 +91,7 @@ def _grant_text(grantee: str, permission: str, state: str, object_name: str | No
     return f"{verb} {permission} ON {target} TO [{grantee}]{suffix};"
 
 
-def render_snapshot(server: str, database: str, exported_at: datetime, modules, columns, grants) -> str:
+def render_snapshot(server: str, database: str, exported_at: datetime, modules, columns, grants, members=()) -> str:
     """The snapshot file's text. Rows are tuples in the column order of the queries above."""
     counts: dict[str, int] = {}
     for _, type_desc, _ in modules:
@@ -88,6 +111,13 @@ def render_snapshot(server: str, database: str, exported_at: datetime, modules, 
         "/* ---- Permissions on the ai_api schema and its objects ---- */",
     ]
     out += [_grant_text(*row) for row in grants] or ["-- none"]
+
+    out += [
+        "",
+        "/* ---- Role memberships of everyone who can run ai_api procedures ---- */",
+        "/* These show what else those logins can do in the database, not just in ai_api. */",
+    ]
+    out += [f"ALTER ROLE [{role}] ADD MEMBER [{member}];" for role, member in members] or ["-- none"]
 
     for table in tables:
         out += ["", f"/* ---- Table ai_api.{table} (columns only) ---- */"]
@@ -154,6 +184,7 @@ def main() -> None:
         modules = [tuple(row) for row in cursor.execute(MODULES_SQL).fetchall()]
         columns = [tuple(row) for row in cursor.execute(COLUMNS_SQL).fetchall()]
         grants = [tuple(row) for row in cursor.execute(GRANTS_SQL).fetchall()]
+        members = [tuple(row) for row in cursor.execute(MEMBERS_SQL).fetchall()]
     finally:
         conn.close()
 
@@ -168,10 +199,10 @@ def main() -> None:
             f"{', ...' if len(hidden) > 5 else ''}). It needs VIEW DEFINITION on the ai_api schema; "
             "use ASR_CS_Owner or another db_owner login. Nothing was written."
         )
-    text = render_snapshot(args.server, args.database, datetime.now(UTC), modules, columns, grants)
+    text = render_snapshot(args.server, args.database, datetime.now(UTC), modules, columns, grants, members)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(text, encoding="utf-8", newline="\n")
-    print(f"Wrote {args.out} ({len(modules)} definitions, {len(grants)} permissions).")
+    print(f"Wrote {args.out} ({len(modules)} definitions, {len(grants)} permissions, {len(members)} role memberships).")
 
 
 if __name__ == "__main__":
