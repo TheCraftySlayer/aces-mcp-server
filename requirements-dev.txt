@@ -1,7 +1,9 @@
-# For running the tests and the linter. Not installed in the server image.
+# For running the tests, the linter and the package audit. Not installed in the server image.
 #   python -m pip install -r requirements-dev.txt
 #   python -m pytest
 #   python -m ruff check .
+#   python -m pip_audit -r requirements.txt --no-deps --disable-pip
 -r requirements.txt
+pip-audit==2.10.1
 pytest==9.2.0
 ruff==0.17.3

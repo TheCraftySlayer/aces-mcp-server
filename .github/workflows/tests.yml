@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # New advisories come out without any change here, so the audit also runs every Monday.
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
 
 jobs:
   test:
@@ -19,3 +23,17 @@ jobs:
       - run: python -m pytest
       - run: python -m ruff check .
       - run: python -m ruff format --check .
+      # Fails the run when any package the server image installs has a published advisory.
+      # Every line in requirements.txt is pinned, so no resolving is needed (--no-deps).
+      - name: Known vulnerabilities in the server's packages
+        run: python -m pip_audit -r requirements.txt --no-deps --disable-pip --progress-spinner off
+      # Software bill of materials for reviewers: every package and version in the image.
+      - name: Package list (SBOM)
+        if: always()
+        run: python -m pip_audit -r requirements.txt --no-deps --disable-pip --progress-spinner off -f cyclonedx-json -o sbom.cdx.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: ignore
