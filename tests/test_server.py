@@ -48,10 +48,9 @@ def test_every_tool_has_a_description(rpc):
         assert len(tool.get("description") or "") > 40, tool["name"]
 
 
-def test_instructions_name_every_non_sql_tool():
+def test_instructions_name_every_tool():
     for name in EXPECTED_TOOLS:
-        if not name.startswith("ACES_") or name == "ACES_Key_Facts":
-            assert name in server.mcp.instructions, name
+        assert name in server.mcp.instructions, name
 
 
 def test_key_facts_tells_every_caller_to_drop_specialist_text_on_open_points(rpc):
@@ -72,14 +71,26 @@ def test_chat_needs_the_access_key(client):
     assert response.status_code == 401
 
 
-def test_health_is_open_and_reports_what_is_on(client):
+def test_health_is_open_and_says_only_whether_the_server_is_up(client):
     health = client.get("/health").json()
-    assert health["status"] == "healthy"
-    assert health["build"] == "pytest"
-    assert health["sql_tools_registered"] is True
-    assert health["mcp_api_key_configured"] is True
+    # Nothing about settings, projects, users, files or routes. The chat page needs chat_enabled.
+    assert health == {"status": "healthy", "service": "aces-mcp-server", "build": "pytest", "chat_enabled": True}
+
+
+def test_health_details_need_the_admin_token(client):
+    assert client.get("/health/details").status_code == 401
+    assert client.get("/health/details", headers={"x-aces-admin-token": "wrong"}).status_code == 401
+
+
+def test_health_details_report_what_is_on(client):
+    details = client.get("/health/details", headers={"x-aces-admin-token": TEST_ADMIN_TOKEN}).json()
+    assert details["build"] == "pytest"
+    assert details["sql_tools_registered"] is True
+    assert details["mcp_api_key_configured"] is True
+    # The tool list comes from the server's own registry.
+    assert set(details["tools"]) == EXPECTED_TOOLS
     # Download links are skipped rather than pointed at a retired host.
-    assert health["public_base_url"] == ""
+    assert details["public_base_url"] == ""
 
 
 def test_root_sends_browsers_to_the_chat(client):

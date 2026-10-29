@@ -229,7 +229,8 @@ if ($haveStamp -eq $wantStamp) {
 
 $mcpKey = New-RandomKey
 $env:ACES_MCP_API_KEY       = $mcpKey
-$env:ACES_ADMIN_TOKEN       = New-RandomKey
+$adminToken = New-RandomKey
+$env:ACES_ADMIN_TOKEN       = $adminToken
 $env:ACES_SQL_TOOLS_ENABLED = "true"
 # Every SQL setting is set for both targets so nothing left over in this window carries across.
 if ($onPrem) {
@@ -297,12 +298,19 @@ if ($null -eq $health) {
     Stop-WithMessage "The server didn't start within 45 seconds. Check the server window for the error. The next run reinstalls the Python packages in case that's the cause."
 }
 
+# /health only says the server is up. The details (SQL tools, chat model) need the admin token.
+$details = $health
+try {
+    $details = Invoke-RestMethod "http://127.0.0.1:$port/health/details" -Headers @{ "x-aces-admin-token" = $adminToken } -TimeoutSec 5
+} catch { }
+Remove-Variable adminToken
+
 Write-Host ""
 Write-Host "Server is running." -ForegroundColor Green
-Write-Host ("  SQL tools: " + $(if ($health.sql_tools_registered) { "on" } else { "off" }))
+Write-Host ("  SQL tools: " + $(if ($details.sql_tools_registered) { "on" } else { "off" }))
 Write-Host ("  Database:  " + $target)
-Write-Host ("  Chat:      " + $(if ($health.chat_enabled) { "on ($($health.chat_model))" } else { "off (no Anthropic key saved)" }))
-Write-Host ("  Workspace: " + $(if ($health.chat_workspace_set) { $env:ACES_ANTHROPIC_WORKSPACE_ID } else { "none set (chat needs one unless your Anthropic key was made inside a workspace)" }))
+Write-Host ("  Chat:      " + $(if ($details.chat_enabled) { "on ($($details.chat_model))" } else { "off (no Anthropic key saved)" }))
+Write-Host ("  Workspace: " + $(if ($details.chat_workspace_set) { $env:ACES_ANTHROPIC_WORKSPACE_ID } else { "none set (chat needs one unless your Anthropic key was made inside a workspace)" }))
 Write-Host ""
 Write-Host "Opening the chat in your browser. Close the server window to stop."
 

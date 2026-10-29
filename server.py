@@ -29,9 +29,8 @@ import aces_sql_tools
 
 # Describe the SQL data tools to the model only when they will actually register.
 _SQL_TOOLS_NOTE = (
-    " Also exposes ten read-only ACES data tools (ACES_Office_Volume, ACES_Forecast, "
-    "ACES_Forecast_Accuracy, ACES_NOV_Parcel, ACES_NOV_Search, ACES_NOV_Coverage, ACES_Deed_Volume, "
-    "ACES_Assessment_Calendar, ACES_Daily_Briefing, ACES_Season_Outlook) that query the ACES database through fixed stored "
+    f" Also exposes {len(aces_sql_tools.TOOL_NAMES)} read-only ACES data tools "
+    f"({', '.join(aces_sql_tools.TOOL_NAMES)}) that query the ACES database through fixed stored "
     "procedures. ACES_Daily_Briefing combines today's forecast, the last open day's results, recent deed "
     "volume and upcoming calendar dates in one call."
     if aces_sql_tools.SQL_TOOLS_ENABLED and not aces_sql_tools._config_problem()
@@ -2454,6 +2453,27 @@ async def web_ui_route(request):
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
+    """
+    Open on purpose: App Service health checks, deploy.ps1, the local launcher and the
+    chat page call it without credentials. It says only that the server is up, which
+    build it runs and whether chat is on (the chat page needs that). Everything else is
+    on /health/details behind the admin token.
+    """
+    return JSONResponse(
+        {
+            "status": "healthy",
+            "service": "aces-mcp-server",
+            "build": os.getenv("ACES_BUILD_TAG", "dev"),
+            "chat_enabled": aces_chat.CHAT_ENABLED,
+        }
+    )
+
+
+@mcp.custom_route("/health/details", methods=["GET"])
+async def health_details(request):
+    """Admin-only: settings in effect, cache sizes, and the tools actually registered."""
+    if (denied := _require_admin_debug_auth(request)) is not None:
+        return denied
     return JSONResponse(
         {
             "status": "healthy",
@@ -2510,19 +2530,8 @@ async def health_check(request):
             "allowed_users_count": len(ALLOWED_USERS),
             "chat_model": aces_chat.CHAT_MODEL if aces_chat.CHAT_ENABLED else "",
             "chat_workspace_set": bool(aces_chat.ANTHROPIC_WORKSPACE_ID),
-            "tools": [
-                "Community_Educator",
-                "Assessment_Context_Expert",
-                "Clear_Expectations",
-                "Compliance_Expert",
-                "Smart_Tasks",
-                "Check_CustomGPT_Task",
-                "ArcGIS_Public_Parcel_Lookup",
-                "ArcGIS_Public_Parcel_Map",
-                "ArcGIS_Public_Candidate_Peers",
-                "UPC_Router_Link",
-            ]
-            + (aces_sql_tools.TOOL_NAMES if aces_sql_tools.REGISTERED else []),
+            # Read from the server itself, so this list can't drift from what callers see.
+            "tools": sorted(tool.name for tool in await mcp.list_tools()),
         }
     )
 
