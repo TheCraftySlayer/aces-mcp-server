@@ -100,9 +100,10 @@ Points a reviewer usually asks about:
   underscores. Both go into CustomGPT URLs that carry the server's API token, so this
   stops a value like `9262/../../12345` from reaching another project or API path.
 - **SQL**: procedure names are constants and every input is a bound parameter. There's
-  no free-form SQL. The production login (the App Service managed identity) can only
-  EXECUTE the `ai_api` schema, and each procedure logs its own calls to
-  `ai_api.tool_log`.
+  no free-form SQL. The server's login can only EXECUTE the `ai_api` schema: on Azure
+  that's the App Service managed identity, and on a county SQL Server it's
+  `ACES_MCP_Reader` from `sql/55` and `sql/56`, which also check it. Each procedure logs
+  its own calls to `ai_api.tool_log`.
 - **Secrets** live only in app settings or, for local runs, in a DPAPI-encrypted file
   under `%LOCALAPPDATA%\ACES`. Nothing secret is in the repo or its history.
 
@@ -226,8 +227,10 @@ Their current definitions are in the database snapshot in the ACES forecasting r
 - **`server.py` is about 4,500 lines.** The plan is to split it by area (CustomGPT
   client, ArcGIS, REST wrappers, access control) once there are tests around the live
   CustomGPT and ArcGIS paths, so the split can be checked against real behavior.
-- **The on-prem test login** (`start-aces.bat` with the county database) can change
-  every table. A login limited to EXECUTE on `ai_api` is needed before the server runs
-  on a county server around the clock.
+- **The on-prem login.** `sql/55` and `sql/56` create `ACES_MCP_Reader`, which can
+  only EXECUTE the `ai_api` procedures, and check that's all it can do. The DBA runs 55
+  (it creates a server login); 56 runs in the database. Until then, `start-aces.bat`
+  with the county database signs in as `ASR_CS_User`, which can change every table, and
+  warns about it on every start.
 - **One maintainer.** A second person who can deploy, rotate keys and update the facts
   file hasn't been named yet.

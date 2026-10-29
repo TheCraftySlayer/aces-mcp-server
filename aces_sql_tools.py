@@ -6,14 +6,19 @@ the connection settings are present, so deploying this file changes nothing
 until you turn it on.
 
 Design rules
-  - Each tool calls exactly one stored procedure in ai_api, with one exception:
+  - Each tool calls one stored procedure in ai_api, with two exceptions:
     ACES_Daily_Briefing runs five of the same read-only procedures (office
     volume, forecast, forecast accuracy, deed volume, assessment calendar) and
-    returns them together. It adds no new SQL or permissions, and each call is
-    still logged. Procedure names are constants here; user input only ever
-    travels as bound parameters.
-  - The database login can only EXECUTE ai_api procedures. It has no SELECT
-    on any table or view, and every call is logged inside the procedure.
+    returns them together, and the deed tools also call ai_api.deed_freshness
+    for a one-line note on how current the deed data is. Neither adds new SQL
+    or permissions, and each call is still logged. Procedure names are
+    constants here; user input only ever travels as bound parameters.
+  - The database login should be able to EXECUTE ai_api procedures and nothing
+    else: no SELECT on any table or view, and every call is logged inside the
+    procedure. On Azure that's the web app's managed identity. On a county SQL
+    Server it's ACES_MCP_Reader (sql/55 and sql/56, which also check it). The
+    on-prem test login ASR_CS_User can read and change every table and is for
+    a test on one PC only; start-aces.ps1 warns whenever it's in use.
   - No exemptions, staff data, phone numbers, or free-form SQL.
 
 Settings (environment variables)
