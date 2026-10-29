@@ -16,3 +16,4 @@ sql/
 requirements-dev.txt
 pyproject.toml
 README.md
+sign_facts.py

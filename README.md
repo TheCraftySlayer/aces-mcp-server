@@ -34,6 +34,7 @@ flowchart LR
 | `aces_chat.py` | `POST /chat`: the tool loop behind the staff chat page, for either Azure OpenAI or Anthropic. |
 | `aces_charts.py` | `Build_Chart`, a chat-only tool. It reads every chart value from a data tool result already in the conversation, never from the model. |
 | `aces_facts.py`, `aces_facts.json` | `ACES_Key_Facts`: staff-reviewed figures, deadlines and citations. |
+| `sign_facts.py` | Signs reviewed facts rows with a reviewer's name and today's date. |
 | `web_ui.html` | The staff chat page. |
 | `start-aces.bat`, `start-aces.ps1` | Starts the server on a Windows PC and opens the chat. |
 | `deploy.ps1` | Builds and deploys the container to Azure App Service, with checks and automatic rollback. |
@@ -171,6 +172,15 @@ isn't settled. A reviewed row older than `ACES_FACTS_REVIEW_DAYS` (default 365) 
 flagged as overdue. Every change to the file goes through a commit, and
 `tests/test_facts.py` checks the file's shape.
 
+To sign rows after checking them against their sources:
+
+```
+python sign_facts.py "Your Name" row_id [row_id ...]
+python sign_facts.py --list
+```
+
+`--list` shows each row's status and who signed it when.
+
 ## Tests and lint
 
 ```
@@ -199,7 +209,6 @@ Their current definitions are in the database snapshot in the ACES forecasting r
 - **`server.py` is about 4,500 lines.** The plan is to split it by area (CustomGPT
   client, ArcGIS, REST wrappers, access control) once there are tests around the live
   CustomGPT and ArcGIS paths, so the split can be checked against real behavior.
-- **The facts signing script, `sign_facts.py`, isn't in the repo yet.**
 - **The on-prem test login** (`start-aces.bat` with the county database) can change
   every table. A login limited to EXECUTE on `ai_api` is needed before the server runs
   on a county server around the clock.
