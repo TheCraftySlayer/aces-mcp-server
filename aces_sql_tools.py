@@ -13,12 +13,14 @@ Design rules
     for a one-line note on how current the deed data is. Neither adds new SQL
     or permissions, and each call is still logged. Procedure names are
     constants here; user input only ever travels as bound parameters.
-  - The database login should be able to EXECUTE ai_api procedures and nothing
-    else: no SELECT on any table or view, and every call is logged inside the
-    procedure. On Azure that's the web app's managed identity. On a county SQL
-    Server it's ACES_MCP_Reader (sql/55 and sql/56, which also check it). The
-    on-prem test login ASR_CS_User can read and change every table and is for
-    a test on one PC only; start-aces.ps1 warns whenever it's in use.
+  - What the login can do depends on the database. On Azure, the web app's
+    managed identity can only EXECUTE ai_api procedures. On the county server
+    the server signs in as ASR_CS_User, which can read and change every table,
+    so there the read-only rule rests on this file: the only statement it sends
+    is EXEC of a fixed ai_api procedure name with bound parameters, and
+    _run_proc_sync refuses anything else before connecting.
+    tests/test_sql_read_only.py checks every tool against that. Every call is
+    logged inside the procedure.
   - No exemptions, staff data, phone numbers, or free-form SQL.
 
 Settings (environment variables)
@@ -214,7 +216,18 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+# The only statement this module sends is EXEC of an ai_api procedure with bound
+# parameters. On the county server the login (ASR_CS_User) can change every table, so the
+# database won't stop anything else; this check, in the one function that talks to SQL
+# Server, does.
+_PROC_NAME = re.compile(r"ai_api\.[a-z_]+")
+_PARAM_NAME = re.compile(r"[a-z_]+")
+
+
 def _run_proc_sync(proc: str, params: list[tuple[str, Any]]) -> tuple[list[str], list[list[Any]]]:
+    if not _PROC_NAME.fullmatch(proc) or not all(_PARAM_NAME.fullmatch(name) for name, _ in params):
+        raise ValueError(f"Refused {proc!r}: only ai_api procedures with plain parameter names are run.")
+
     import pyodbc  # imported lazily so the server starts without it when tools are off
 
     sql = f"EXEC {proc} " + ", ".join(f"@{name} = ?" for name, _ in params)

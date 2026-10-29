@@ -45,7 +45,7 @@ flowchart LR
 | `start-aces.bat`, `start-aces.ps1` | Starts the server on a Windows PC and opens the chat. |
 | `deploy.ps1` | Builds and deploys the container to Azure App Service, with checks and automatic rollback. |
 | `Dockerfile` | Container image: Python 3.12 plus Microsoft ODBC Driver 18. |
-| `sql/` | The `ai_api` schema snapshot, the export script, the numbered changes in the order they were applied, and the limited login. See `sql/README.md`. |
+| `sql/` | The `ai_api` schema snapshot, the export script, and the numbered changes in the order they were applied. See `sql/README.md`. |
 | `tests/` | Tests that run without any network or database. |
 | `examples/` | Sample MCP requests. |
 
@@ -106,10 +106,13 @@ Points a reviewer usually asks about:
   underscores. Both go into CustomGPT URLs that carry the server's API token, so this
   stops a value like `9262/../../12345` from reaching another project or API path.
 - **SQL**: procedure names are constants and every input is a bound parameter. There's
-  no free-form SQL. The server's login can only EXECUTE the `ai_api` schema: on Azure
-  that's the App Service managed identity, and on a county SQL Server it's
-  `ACES_MCP_Reader` from `sql/55` and `sql/56`, which also check it. Each procedure logs
-  its own calls to `ai_api.tool_log`.
+  no free-form SQL. On Azure the App Service managed identity can only EXECUTE the
+  `ai_api` schema. On the county server the server signs in as `ASR_CS_User`, which can
+  read and change every table, so there the read-only rule is enforced by the code:
+  the only statement sent is `EXEC ai_api.<fixed name>` with bound parameters
+  (`_run_proc_sync` in `aces_sql_tools.py`), and `tests/test_sql_read_only.py` runs
+  every data tool, including an injection attempt, and fails on anything else. Each
+  procedure logs its own calls to `ai_api.tool_log`.
 - **Secrets** live only in app settings or, for local runs, in a DPAPI-encrypted file
   under `%LOCALAPPDATA%\ACES`. Nothing secret is in the repo or its history.
 
@@ -226,9 +229,9 @@ every tool; live answers are checked by hand.
 
 `sql/` holds the database side. `sql/current/ai_api.sql` is the `ai_api` schema as it
 is in the database (every procedure the tools call, the `tool_log` columns and every
-permission on the schema), written by `sql/export_ai_api.py`; read it to check what the
-server's login can run. The numbered scripts are the changes applied, in order, and 55
-and 56 set up the limited login. `sql/README.md` explains each file.
+permission on the schema), written by `sql/export_ai_api.py`; read it to check what each
+procedure the data tools call does. The numbered scripts are the changes applied, in order.
+`sql/README.md` explains each file.
 
 ## Known gaps
 
@@ -239,10 +242,9 @@ and 56 set up the limited login. `sql/README.md` explains each file.
   changing it, so functions other modules now import (such as `_log` and
   `_require_rest_auth`) still have a leading underscore. Renaming them is a separate,
   mechanical change.
-- **The on-prem login.** `sql/55` and `sql/56` create `ACES_MCP_Reader`, which can
-  only EXECUTE the `ai_api` procedures, and check that's all it can do. The DBA runs 55
-  (it creates a server login); 56 runs in the database. Until then, `start-aces.bat`
-  with the county database signs in as `ASR_CS_User`, which can change every table, and
-  warns about it on every start.
+- **The county database login can change every table.** On the county server the
+  server signs in as `ASR_CS_User`, the same login other ACES jobs use. Read-only there
+  depends on the server's code and its test, not on database permissions, and the
+  login's password is kept with the server's other secrets.
 - **One maintainer.** A second person who can deploy, rotate keys and update the facts
   file hasn't been named yet.
