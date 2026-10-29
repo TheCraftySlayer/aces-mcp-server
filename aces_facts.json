@@ -1,5 +1,5 @@
 {
-  "about": "Staff-reviewed key facts for A.C.E.S. Change by commit only. A row counts as reviewed only when status is reviewed and reviewed_by and last_reviewed (YYYY-MM-DD) are filled in. Rows marked draft were compiled from the sources listed and need a sign-off from someone who has checked them against those sources.",
+  "about": "Staff-reviewed key facts for A.C.E.S. Change by commit only. A row counts as reviewed only when status is reviewed and reviewed_by and last_reviewed (YYYY-MM-DD) are filled in. Rows marked draft were compiled from the sources listed and need a sign-off from someone who has checked them against those sources. A reviewed row can also be co-signed by the person who owns the topic (python sign_facts.py --cosign); the co-signature lapses if the row's topic, tax year, fact or source changes.",
   "topics": [
     "value freeze",
     "protest",

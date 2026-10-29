@@ -241,10 +241,20 @@ To sign rows after checking them against their sources:
 
 ```
 python sign_facts.py "Your Name" row_id [row_id ...]
+python sign_facts.py --cosign "Topic Owner" row_id [row_id ...]
 python sign_facts.py --list
 ```
 
-`--list` shows each row's status and who signed it when.
+`--list` shows each row's status, who signed it when, and whether it has a current
+co-signature.
+
+**Co-signing.** A reviewed row should also be co-signed by the person who owns the topic
+(the Value Freeze team for value freeze, a supervisor for protests), so "reviewed" doesn't
+mean only "reviewed by the developer." The co-signer has to be someone other than the
+reviewer, and the co-signature records a fingerprint of the row's topic, tax year, fact and
+source, so it lapses the moment any of them change. The facts tool shows who co-signed. With
+`ACES_FACTS_REQUIRE_COSIGN=true`, a reviewed row without a current co-signature counts as a
+draft; turn that on once the topic owners have signed their rows.
 
 ## Tests and lint
 
