@@ -88,3 +88,13 @@ def test_open_items_rule_covers_specialist_text():
     prompt = aces_chat._system_prompt()
     assert "Check every part of a specialist's answer against every OPEN item returned" in prompt
     assert "even if you would attribute it or hedge it" in prompt
+
+
+def test_reviewed_facts_answer_without_a_specialist():
+    # Oct 29, 2026: a statute-citation question the reviewed facts answered in under a second still went
+    # to the Compliance Expert (63 s, four Opus queries) for an answer that couldn't change anything.
+    prompt = aces_chat._system_prompt()
+    assert "call ACES_Key_Facts for that topic and tax year first, on its own" in prompt
+    assert "Don't call a specialist when: a REVIEWED fact fully answers the question" in prompt
+    # The open-item rule still has to apply when a specialist is called.
+    assert "Check every part of a specialist's answer against every OPEN item returned" in prompt

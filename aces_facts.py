@@ -24,8 +24,9 @@ REVIEW_MAX_DAYS = int(os.getenv("ACES_FACTS_REVIEW_DAYS", "365"))
 
 DESCRIPTION = (
     "Read-only. Returns staff-reviewed key facts (dollar limits, deadlines, exemption amounts, statute "
-    "citations, office contact details) from a reviewed file, not a chatbot. Call it before giving staff any "
-    "figure, deadline or citation, and compare the specialist's answer with it. topic is one of: {topics}. "
+    "citations, office contact details) from a reviewed file, not a chatbot. Call it first, before any "
+    "specialist, for any figure, deadline or citation. If a REVIEWED fact fully answers the question, "
+    "answer from it without calling a specialist. topic is one of: {topics}. "
     "tax_year is optional, for example 2026. A REVIEWED fact wins over a specialist answer that differs. "
     "OPEN items are unsettled: say so and refer staff to a supervisor instead of answering, and leave out "
     "anything a specialist says on an OPEN point, even with attribution. If the result "

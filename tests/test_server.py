@@ -59,6 +59,7 @@ def test_key_facts_tells_every_caller_to_drop_specialist_text_on_open_points(rpc
     _, body = rpc("tools/list")
     facts = next(t for t in body["result"]["tools"] if t["name"] == "ACES_Key_Facts")
     assert "leave out anything a specialist says on an OPEN point" in facts["description"]
+    assert "answer from it without calling a specialist" in facts["description"]
 
 
 def test_mcp_needs_the_access_key(rpc):
