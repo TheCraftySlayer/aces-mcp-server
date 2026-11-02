@@ -1,0 +1,60 @@
+# A.C.E.S. MCP server on a Linux host. Use linux/install.sh and linux/update.sh rather
+# than running this by hand; they set ACES_BUILD_TAG to the commit being built so every
+# build stays on the host for rollback. See linux/README.md.
+name: aces
+
+services:
+  aces:
+    image: aces-mcp:${ACES_BUILD_TAG:-dev}
+    build:
+      context: ..
+      args:
+        ACES_BUILD_TAG: ${ACES_BUILD_TAG:-dev}
+    container_name: aces
+    restart: unless-stopped
+
+    # County settings and secrets (root-only file on the host).
+    env_file: /etc/aces/aces.env
+    # Fixed container paths. These win over anything with the same name in aces.env.
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      HOME: /tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+      TASK_CACHE_FILE: /data/aces_task_cache.json
+      ACES_FILE_LINK_CACHE_FILE: /data/aces_file_links.json
+      ACES_SERVER_SECRET_FILE: /data/server-secret.key
+      ACES_LOG_FILE: /data/logs/aces.log
+
+    # Staff reach it on 443; inside, the unprivileged user listens on 8000.
+    ports:
+      - "443:8000"
+
+    volumes:
+      # Cache, logs and the sign-in signing key. Lose this and everyone signs in again.
+      - /var/lib/aces:/data
+      - /etc/aces/tls:/tls:ro
+
+    # The server can only write to /data and /tmp, and gets no extra Linux privileges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # Assumes HTTPS is on. If a proxy handles HTTPS instead, change https to http here.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl, urllib.request as u; u.urlopen('https://127.0.0.1:8000/health', context=ssl._create_unverified_context(), timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+    # Keep Docker's own copy of stdout from filling the disk. The server's log files are in /data/logs.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"

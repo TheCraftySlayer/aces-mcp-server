@@ -2,3 +2,5 @@
 * text=auto
 # cmd.exe can misread batch files with LF endings.
 *.bat text eol=crlf
+# Shell scripts run on Linux and break with CRLF endings.
+*.sh text eol=lf
